@@ -6,9 +6,9 @@ binary; it never recompiles. No Rust, Visual Studio Build Tools, or Windows SDK 
 
 ## Local prerequisites
 
-- Windows x64, Git, VS Code, and the Microsoft **C/C++** extension (`ms-vscode.cpptools`). The extension supplies the
-  Windows native debugger (`cppvsdbg`), which loads Rust MSVC PDBs. Rust variable rendering may be less rich than a
-  dedicated Rust debugger. No compiler installation is needed.
+- Windows x64, Git, VS Code, and the installed and enabled Microsoft **C/C++** extension (`ms-vscode.cpptools`). The
+  extension supplies the Windows native debugger (`cppvsdbg`), which loads Rust MSVC PDBs. Rust variable rendering may
+  be less rich than a dedicated Rust debugger. No compiler installation is needed.
 - Microsoft Edge WebView2 Evergreen Runtime, version 110 or newer. This is a runtime, not the SDK. The build uses the
   system runtime and statically links the MSVC CRT, as specified in `.cargo/config.toml`.
 - A GitHub account with Actions enabled on the fork. GitHub CLI is optional; the Actions web UI is sufficient.
@@ -64,6 +64,10 @@ The artifact contains `seelen-ui.exe`, `slu.exe`, `slu-service.exe`, `sluhk.dll`
 `SHA256SUMS`, the debug `SHA256SUMS.sig` marker, frontend bundles/maps, the license, the exact source SHA and build
 metadata. The external WebView2 Evergreen Runtime must already be installed locally.
 
+The helper service registers its normal scheduled startup task when it starts, even without an installer. If you
+temporarily replace an installed Seelen instance for testing, start the installed service again afterward to restore its
+task's executable path. Keep the extracted debug directory in place while its service is registered.
+
 If a breakpoint remains hollow, inspect the Debug Console/module symbol status, verify the correct process and PDB, and
 compare `git rev-parse HEAD` with `COMMIT_SHA.txt`. `requireExactSource` deliberately checks source consistency.
 `sourceFileMap` translates the runner checkout paths to your workspace. If GitHub changes its workspace location,
@@ -102,3 +106,22 @@ feature was started on fork master, recreate it from upstream and cherry-pick on
 The setup must be validated with a real remote build, extraction, local startup, and a Rust source breakpoint that both
 resolves and is hit. Artifact packaging assertions alone do not establish runtime or debugger success. Record the
 workflow run URL, source SHA, startup result, and breakpoint result when validation is performed.
+
+Validated on 7 October 2026 with [run 37630646024](https://github.com/dvirtz/Seelen-UI/actions/runs/37630646024), source
+commit `30461eebf459c050ab3a04fcb29c778fed6b9d04`:
+
+- Remote debug build, artifact upload, and dependency/output cache saves succeeded.
+- Downloaded ZIP matched GitHub's artifact digest; executable, PDB, runtime-resource and frontend-map hashes passed.
+  Redundant external `frontend/icons` copies remain in the verified ZIP; icons are embedded in the executable.
+- Downloaded `seelen-ui.exe --help` ran locally and exited with code 0.
+- The shipped VS Code launch configuration loaded the PDB and resolved and hit the Rust source breakpoint at
+  `src/background/main.rs:66`, with `requireExactSource: true` and the CI-to-local source mapping. The native debugger
+  reported `verified: true`, `reason: breakpoint`, and a Rust stack frame on that line. The test used an isolated VS
+  Code profile with the existing C/C++ extension enabled; the regular profile's first attempt timed out.
+- Full desktop startup, helper elevation, attach debugging, and a live DevTools frontend breakpoint were not tested. The
+  installed Seelen instance was left running. Source-map generation and the existing DevTools feature were verified by
+  the build and source inspection.
+
+The first artifact contains no `GENERATED_INPUTS.diff` because there were no tracked generated-input differences. The
+packaging script now always writes that file, including when it is empty. Later tooling/documentation commits do not
+change the application sources used in this validation.
