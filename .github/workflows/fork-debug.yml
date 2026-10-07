@@ -1,0 +1,97 @@
+name: Fork debug build
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch in dvirtz/Seelen-UI to build
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'dvirtz/Seelen-UI'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_PROFILE_DEV_DEBUG: full
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_INCREMENTAL: "true"
+      # No custom-protocol: Seelen's unsigned integrity path requires tauri::is_dev().
+      # With no devUrl, Tauri embeds frontendDist even in development mode.
+      TAURI_CONFIG: '{"build":{"devUrl":null}}'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - name: Record source commit
+        id: source
+        run: |
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE) { throw 'Cannot resolve source commit' }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      # Tools come from the workflow ref, so contribution branches need no fork files.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .fork-tools
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          rust-targets: x86_64-pc-windows-msvc
+          cache-key-prefix: fork-debug-x64-v1
+
+      - name: Restore recent debug outputs
+        uses: actions/cache@v4
+        with:
+          path: target/x86_64-pc-windows-msvc/debug
+          key: fork-debug-outputs-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ steps.source.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fork-debug-outputs-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Install frontend dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { throw 'npm ci failed' }
+
+      - name: Build frontend with source maps
+        run: |
+          npm run build:ui
+          if ($LASTEXITCODE) { throw 'Frontend build failed' }
+
+      - name: Build hook DLL
+        run: |
+          cargo build --locked --target x86_64-pc-windows-msvc -p sluhk
+          if ($LASTEXITCODE) { throw 'Hook build failed' }
+
+      - name: Build all runnable binaries (unsigned, embedded UI)
+        run: |
+          cargo build --locked --target x86_64-pc-windows-msvc -p seelen-ui --bins
+          if ($LASTEXITCODE) { throw 'Rust build failed' }
+
+      - name: Stage and verify artifact contents
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
+          TOOLS_SHA: ${{ github.sha }}
+        run: ./.fork-tools/.github/fork-debug/package.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seelen-debug-x64-${{ steps.source.outputs.sha }}
+          path: target/fork-debug/
+          if-no-files-found: error
+          retention-days: 14

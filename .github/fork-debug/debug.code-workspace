@@ -1,0 +1,36 @@
+{
+  "folders": [{ "path": "../.." }],
+  "extensions": { "recommendations": ["ms-vscode.cpptools"] },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Seelen: launch downloaded debug build",
+        "type": "cppvsdbg",
+        "request": "launch",
+        "program": "${workspaceFolder}/target/fork-debug/seelen-ui.exe",
+        "cwd": "${workspaceFolder}/target/fork-debug",
+        "args": [],
+        "stopAtEntry": false,
+        "symbolSearchPath": "${workspaceFolder}/target/fork-debug",
+        "requireExactSource": true,
+        "sourceFileMap": {
+          "D:\\a\\Seelen-UI\\Seelen-UI": "${workspaceFolder}",
+          "C:\\a\\Seelen-UI\\Seelen-UI": "${workspaceFolder}"
+        }
+      },
+      {
+        "name": "Seelen: attach to downloaded binary or service",
+        "type": "cppvsdbg",
+        "request": "attach",
+        "processId": "${command:pickProcess}",
+        "symbolSearchPath": "${workspaceFolder}/target/fork-debug",
+        "requireExactSource": true,
+        "sourceFileMap": {
+          "D:\\a\\Seelen-UI\\Seelen-UI": "${workspaceFolder}",
+          "C:\\a\\Seelen-UI\\Seelen-UI": "${workspaceFolder}"
+        }
+      }
+    ]
+  }
+}
