@@ -44,7 +44,9 @@ Set-Content -LiteralPath "$stage/COMMIT_SHA.txt" -Value $env:SOURCE_SHA -Encodin
 } | ConvertTo-Json | Set-Content -LiteralPath "$stage/BUILD_INFO.json" -Encoding utf8
 
 # Preserve the exact generated-input differences, if any, alongside the base SHA.
-git diff --binary HEAD | Set-Content -LiteralPath "$stage/GENERATED_INPUTS.diff" -Encoding utf8
+$generatedDiff = git diff --binary HEAD
+if ($LASTEXITCODE) { throw 'Cannot record generated-input differences' }
+Set-Content -LiteralPath "$stage/GENERATED_INPUTS.diff" -Value ($generatedDiff -join "`n") -Encoding utf8
 Get-ChildItem $stage -Recurse -File | ForEach-Object {
     "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)  $($_.FullName.Substring($stage.Length + 1))"
 } | Set-Content -LiteralPath "$stage/ARTIFACT_SHA256SUMS.txt" -Encoding utf8
