@@ -225,6 +225,14 @@ impl VdManager {
     pub fn get_monitor_of_workspace(&self, workspace: &WorkspaceId) -> Option<MonitorId> {
         self.workspace_index.get(workspace, |id| id.clone())
     }
+
+    pub fn active_workspace_for_monitor(&self, monitor: &MonitorId) -> Option<WorkspaceId> {
+        self.state
+            .lock()
+            .monitors
+            .get(monitor)
+            .map(|monitor| monitor.active_workspace_id().clone())
+    }
     pub fn is_pinned(&self, window: &isize) -> bool {
         self.state.lock().pinned.contains(window)
     }

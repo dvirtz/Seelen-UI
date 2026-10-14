@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{error::Result, identifier_impl, resource::WallpaperId, system_state::MonitorId};

@@ -564,10 +564,21 @@ impl TwmState {
         &self,
         rect: &Rect,
         workspace_id: &WorkspaceId,
+        monitor_id: Option<&seelen_core::system_state::MonitorId>,
     ) -> Option<isize> {
         let tree = self.state.workspaces.get(workspace_id)?;
-        let node_id = tree.get_nearest_leaf_to_rect(rect)?;
-        tree.face_of_node(node_id)
+        let target = rect.center();
+        tree.iter()
+            .filter(|node| matches!(node.kind, TwmNodeKind::Leaf | TwmNodeKind::Stack))
+            .filter_map(|node| {
+                let face = tree.face_of_node(node.id)?;
+                if monitor_id.is_some_and(|id| &Window::from(face).monitor_id() != id) {
+                    return None;
+                }
+                Some((face, target.distance_squared(&node.rect.as_ref()?.center())))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(face, _)| face)
     }
 
     pub fn get_nearest_tiled_window_at_side(

@@ -54,6 +54,9 @@ jobs:
           rust-targets: x86_64-pc-windows-msvc
           cache-key-prefix: fork-debug-x64-v1
 
+      - name: Install formatter component
+        run: rustup component add rustfmt
+
       - name: Restore recent debug outputs
         uses: actions/cache@v4
         with:
@@ -102,4 +105,5 @@ jobs:
           path: target/fork-debug/
           if-no-files-found: error
           retention-days: 14
+
 
