@@ -38,9 +38,14 @@
   });
 
   let activeWorkspaceData = $derived.by(() => {
-    return vd?.workspaces
-      .flatMap((row, rowIdx) => row.flatMap((workspace, colIdx) => ({ ...workspace, rowIdx, colIdx })))
-      .find((workspace) => workspace.id == vd.active_workspace);
+    const monitor = vd;
+    if (!monitor) return undefined;
+    return monitor.workspaces
+      .flatMap((row, rowIdx) => row.flatMap((id, colIdx) => {
+        const workspace = gState.workspaces.workspaces[id];
+        return workspace ? [{ ...workspace, rowIdx, colIdx }] : [];
+      }))
+      .find((workspace) => workspace.id === monitor.active_workspace);
   });
 
   // Use [0] (newest) instead of .pop() (oldest) on a descending-sorted array.

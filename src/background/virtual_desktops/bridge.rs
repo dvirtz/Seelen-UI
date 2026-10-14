@@ -11,31 +11,28 @@ use crate::{
     error::{Result, ResultLogExt},
     utils::{
         constants::SEELEN_COMMON,
-        lock_free::{SyncHashMap, SyncVec},
+        lock_free::{SyncHashMap, TracedMutex},
     },
     virtual_desktops::VdManager,
 };
 use seelen_core::{
-    state::{VirtualDesktopMonitor, VirtualDesktops, WorkspaceId},
+    state::{VirtualDesktops, WorkspaceId},
     system_state::MonitorId,
 };
 use slu_utils::{Debounce, debounce};
 
 pub fn get_indexes(
-    monitors: &HashMap<MonitorId, VirtualDesktopMonitor>,
+    state: &VirtualDesktops,
 ) -> (HashMap<WorkspaceId, MonitorId>, HashMap<isize, WorkspaceId>) {
     let mut workspace_index = HashMap::new();
     let mut window_index = HashMap::new();
 
-    for (mid, m) in monitors {
-        for row in m.workspaces.rows() {
-            for space in row {
-                workspace_index.insert(space.id.clone(), mid.clone());
-
-                for window in &space.windows {
-                    window_index.insert(*window, space.id.clone());
-                }
-            }
+    for (id, workspace) in &state.workspaces {
+        if let Some(monitor) = state.monitors_for_workspace(id).into_iter().next() {
+            workspace_index.insert(id.clone(), monitor);
+        }
+        for window in &workspace.windows {
+            window_index.insert(*window, id.clone());
         }
     }
 
@@ -44,12 +41,9 @@ pub fn get_indexes(
 
 impl From<VirtualDesktops> for VdManager {
     fn from(value: VirtualDesktops) -> Self {
-        let (workspace_index, window_index) = get_indexes(&value.monitors);
+        let (workspace_index, window_index) = get_indexes(&value);
         Self {
-            monitors: SyncHashMap::from(value.monitors),
-            pinned: SyncVec::from(value.pinned),
-            connected_monitors: SyncVec::from(value.connected_monitors),
-            monitor_names: SyncHashMap::from(value.monitor_names),
+            state: TracedMutex::new(value),
             switching: AtomicU32::new(0),
             workspace_index: SyncHashMap::from(workspace_index),
             window_index: SyncHashMap::from(window_index),
@@ -59,13 +53,9 @@ impl From<VirtualDesktops> for VdManager {
 
 impl From<&VdManager> for VirtualDesktops {
     fn from(value: &VdManager) -> Self {
-        value.monitors.with_lock(|monitors| Self {
-            monitors: monitors.clone(),
-            pinned: value.pinned.to_vec(),
-            switching: value.switching.load(Ordering::SeqCst) > 0,
-            connected_monitors: value.connected_monitors.to_vec(),
-            monitor_names: value.monitor_names.to_hash_map(),
-        })
+        let mut state = value.state.lock().clone();
+        state.switching = value.switching.load(Ordering::SeqCst) > 0;
+        state
     }
 }
 

@@ -20,9 +20,7 @@
       return null;
     }
 
-    const activeWorkspace = monitorData.workspaces
-      .flat()
-      .find((ws) => ws.id === monitorData.active_workspace);
+    const activeWorkspace = gState.virtualDesktops.workspaces[monitorData.active_workspace];
     return activeWorkspace?.wallpaper || null;
   });
 

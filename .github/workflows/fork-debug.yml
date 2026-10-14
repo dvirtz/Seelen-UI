@@ -67,6 +67,13 @@ jobs:
           npm ci
           if ($LASTEXITCODE) { throw 'npm ci failed' }
 
+      - name: Validate workspace registry
+        run: |
+          cargo test --locked -p seelen-core state::workspaces::tests
+          if ($LASTEXITCODE) { throw 'Workspace regression tests failed' }
+          npm run type-check
+          if ($LASTEXITCODE) { throw 'Type checks failed' }
+
       - name: Build frontend with source maps
         run: |
           npm run build:ui
@@ -95,3 +102,4 @@ jobs:
           path: target/fork-debug/
           if-no-files-found: error
           retention-days: 14
+
