@@ -25,6 +25,10 @@ currentWidget.onTrigger(async ({ customArgs }) => {
   await Widget.self.focus();
 });
 
+await currentWidget.window.onCloseRequested(async () => {
+  await notifyDismissed();
+});
+
 export function App() {
   useEffect(() => {
     Widget.self.ready();
@@ -39,7 +43,13 @@ export function App() {
         <div className="header-content">
           {dialog.title.map((entry, idx) => <SluPopupContent key={idx} entry={entry} />)}
         </div>
-        <button className="header-close" onClick={() => currentWidget.window.close()}>
+        <button
+          className="header-close"
+          onClick={async () => {
+            await notifyDismissed();
+            await currentWidget.window.close();
+          }}
+        >
           <Icon iconName="CgClose" />
         </button>
       </header>
@@ -90,21 +100,39 @@ function SluPopupContent({ entry }: { entry: IDialogContent }) {
   }
 }
 
-function handleButtonClick(onClick: string) {
+async function handleButtonClick(onClick: string) {
   if (onClick === "exit") {
-    Widget.self.window.close();
+    await notifyDismissed();
+    await Widget.self.window.close();
     return;
   }
 
+  const closeAfterChoice = !!state.value?.onClose;
+  state.value = null;
+  await emitDialogEvent(onClick);
+  if (closeAfterChoice) {
+    await currentWidget.window.close();
+  } else {
+    await currentWidget.hide();
+  }
+}
+
+async function notifyDismissed() {
+  const onClose = state.value?.onClose;
+  state.value = null;
+  if (onClose) {
+    await emitDialogEvent(onClose);
+  }
+}
+
+async function emitDialogEvent(event: string) {
   if (owner) {
     // frontend-triggered: send event back to the owner widget
-    currentWidget.webview.emitTo(owner, onClick, null);
+    await currentWidget.webview.emitTo(owner, event, null);
   } else {
     // backend-triggered: emit globally so backend listeners can receive it
-    currentWidget.webview.emit(onClick, null);
+    await currentWidget.webview.emit(event, null);
   }
-
-  currentWidget.hide();
 }
 
 function getOnlyText(content: IDialogContent[]) {

@@ -530,6 +530,10 @@ pub struct Settings {
     pub backup_sync_enabled: bool,
     /// Suspend all webviews when Windows GameMode is active to free resources for the game.
     pub suspend_on_game_mode: bool,
+    /// Offer a choice to reuse a disconnected monitor's grid when a display connects.
+    pub share_workspaces_between_monitors: bool,
+    /// Switch connected monitors to the same workspace grid position.
+    pub switch_workspaces_together: bool,
     /// Allow editing read-only shortcuts (e.g. system overrides). Only effective when dev_tools is enabled.
     pub unlock_shortcuts: bool,
 }
@@ -560,6 +564,8 @@ impl Default for Settings {
             streaming_mode: false,
             backup_sync_enabled: true,
             suspend_on_game_mode: false,
+            share_workspaces_between_monitors: false,
+            switch_workspaces_together: false,
             unlock_shortcuts: false,
         }
     }

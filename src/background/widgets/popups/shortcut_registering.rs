@@ -168,5 +168,6 @@ fn get_dialog(id: Uuid, shortcut: &[String]) -> Dialog {
         }],
         content: vec![keys_box],
         footer: actions,
+        ..Default::default()
     }
 }
