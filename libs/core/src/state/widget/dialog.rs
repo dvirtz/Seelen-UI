@@ -13,6 +13,8 @@ pub struct Dialog {
     pub title: Vec<DialogContent>,
     pub content: Vec<DialogContent>,
     pub footer: Vec<DialogContent>,
+    /// Optional event emitted when the dialog is dismissed without a button choice.
+    pub on_close: Option<String>,
 }
 
 impl Default for Dialog {
@@ -24,6 +26,7 @@ impl Default for Dialog {
             title: vec![],
             content: vec![],
             footer: vec![],
+            on_close: None,
         }
     }
 }

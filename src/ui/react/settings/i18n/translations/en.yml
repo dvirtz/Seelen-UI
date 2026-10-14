@@ -141,6 +141,10 @@ extras:
     application will not receive updates and the WebView2 Runtime will not be
     automatically updated with Windows updates.
 general:
+  switch_workspaces_together: Switch workspaces on all monitors together
+  switch_workspaces_together_description: Selecting a workspace switches every connected monitor to the same row and column. Missing workspace positions are created automatically. Can be combined with sharing workspaces between monitor setups.
+  share_workspaces_between_monitors: Share workspaces between monitors
+  share_workspaces_between_monitors_description: When a monitor connects, choose whether to reuse a disconnected monitor's workspace grid or keep a separate grid. Monitors that stay connected keep their own workspaces.
   accent_color: Accent color
   date_format: Date format
   date_format_how_to: How to write a date format?

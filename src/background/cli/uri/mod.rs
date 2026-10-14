@@ -304,6 +304,7 @@ fn resource_to_dialog(id: Uuid, resource: &Resource) -> Result<Dialog> {
             on_click: format!("resource::{}::enable", resource.id),
             styles: None,
         }],
+        ..Default::default()
     })
 }
 

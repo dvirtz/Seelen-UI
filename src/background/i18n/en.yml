@@ -5,6 +5,14 @@ auth:
     again.
   login_failed_title: Login failed
 cancel: Cancel
+workspace_grid:
+  title: Workspaces for %{monitor}
+  body: Choose a disconnected monitor's workspace grid to reuse, or keep separate workspaces on this monitor. New monitors start with a new grid; previously used monitors keep their saved grid. Closing this dialog keeps the separate grid.
+  connected_monitor: Connected monitor
+  saved_monitor: Saved monitor %{number}
+  reuse: 'Reuse %{monitor} (%{count} workspaces): %{preview}'
+  position: Workspace %{row}.%{column}
+  separate: Keep separate workspaces
 done: Done
 elevated:
   description: |-

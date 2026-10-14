@@ -3,6 +3,7 @@ pub mod cli;
 pub mod events;
 pub mod handlers;
 pub mod wallpapers;
+mod workspace_prompt;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -10,7 +11,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use seelen_core::state::{DesktopWorkspace, VirtualDesktopMonitor, VirtualDesktops, WorkspaceId};
 use seelen_core::system_state::MonitorId;
-use windows::Win32::UI::WindowsAndMessaging::{SW_FORCEMINIMIZE, SW_MINIMIZE, SW_RESTORE};
+use windows::Win32::Foundation::RECT;
+use windows::Win32::UI::WindowsAndMessaging::{
+    SW_FORCEMINIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER,
+};
 
 use crate::error::{Result, ResultLogExt};
 use crate::event_manager;
@@ -21,6 +25,7 @@ use crate::utils::lock_free::{SyncHashMap, SyncVec};
 use crate::virtual_desktops::wallpapers::WorkspaceWallpapersManager;
 use crate::windows_api::window::Window;
 use crate::windows_api::window::event::WinEvent;
+use crate::windows_api::MonitorEnumerator;
 
 use events::VirtualDesktopEvent;
 
@@ -53,6 +58,8 @@ pub struct VdManager {
     pub window_index: SyncHashMap<isize, WorkspaceId>,
 
     pub pinned: SyncVec<isize>,
+    connected_monitors: SyncVec<MonitorId>,
+    monitor_names: SyncHashMap<MonitorId, String>,
     /// Count of in-flight `switch_to_id` calls. Used instead of a bool so that
     /// concurrent switches (e.g. on different monitors) don't race: the last
     /// one to finish is the only one allowed to clear the "switching" state.
@@ -74,16 +81,26 @@ impl VdManager {
             }
             Err(_) => Default::default(),
         });
+        let previously_connected = manager.connected_monitors.to_vec();
         manager.initialize().log_error();
 
         // Initialize wallpaper manager and set initial wallpapers
         wallpapers::WorkspaceWallpapersManager::init(&manager);
+        manager.prompt_for_monitors(
+            manager
+                .connected_monitors
+                .to_vec()
+                .into_iter()
+                .filter(|id| !previously_connected.contains(id))
+                .collect(),
+        );
         manager
     }
 
     /// TODO: try to move windows on others native virtual desktops to only one,
     /// or add a warning message to users.
     fn initialize(&mut self) -> Result<()> {
+        self.reconcile_monitors();
         // ensure saved windows are still valid.
         // todo: check if they are on correct monitor
         self.for_each_workspace(|workspace| {
@@ -96,11 +113,11 @@ impl VdManager {
         self.rebuild_indexes();
 
         // restore workspaces state
-        self.monitors.for_each(|(_, monitor)| {
+        self.monitors.for_each(|(monitor_id, monitor)| {
             for row in monitor.workspaces.rows() {
                 for workspace in row {
                     if &workspace.id == monitor.active_workspace_id() {
-                        workspace.restore();
+                        workspace.restore_on_monitor(monitor_id);
                     } else {
                         // allow resume workspaces correctly on change
                         for addr in &workspace.windows {
@@ -111,14 +128,6 @@ impl VdManager {
                 }
             }
         });
-
-        // create monitors
-        for id in MonitorManager::instance().get_cached_ids() {
-            if self.monitors.contains_key(&id) {
-                continue;
-            }
-            self.monitors.upsert(id, VirtualDesktopMonitor::create());
-        }
 
         // scan no added windows, but only add the non minimized ones to the current active workspace.
         // Collected first to not hold the interactables lock while taking the monitors lock (see lock order).
@@ -133,17 +142,13 @@ impl VdManager {
         }
 
         MonitorManager::subscribe(|e| match e {
-            MonitorManagerEvent::ViewAdded(monitor_id) => {
-                Self::instance().monitors.get_or_insert(
-                    monitor_id,
-                    VirtualDesktopMonitor::create,
-                    |_| {},
-                );
-            }
-            MonitorManagerEvent::ViewRemoved(_monitor_id) => {
-                // Todo: move windows to another monitor, this is probably already done by windows events btw.
-                // we don't remove the workspaces items to persist monitor workspaces configuration.
-                // Self::instance().monitors.remove(&monitor_id);
+            MonitorManagerEvent::ViewAdded(_) | MonitorManagerEvent::ViewRemoved(_) => {
+                let manager = Self::instance();
+                let added = manager.reconcile_monitors();
+                workspace_prompt::retain_connected();
+                WorkspaceWallpapersManager::update_workspace_wallpapers_internal(manager);
+                Self::send(VirtualDesktopEvent::StateChanged);
+                manager.prompt_for_monitors(added);
             }
             _ => {}
         });
@@ -167,6 +172,99 @@ impl VdManager {
         Self::subscribe(|_e| {
             bridge::request_save();
         });
+        bridge::request_save();
+        Ok(())
+    }
+
+    /// Reconcile the whole display topology, rather than individual add/remove events:
+    /// monitor notifications can arrive in either order during docking.
+    fn reconcile_monitors(&self) -> Vec<MonitorId> {
+        let connected = MonitorManager::instance().get_cached_ids();
+        if let Ok(displays) = MonitorEnumerator::enumerate_win32() {
+            for display in displays {
+                if let Ok((id, name)) = display.get_stable_info() {
+                    self.monitor_names.upsert(id, name);
+                }
+            }
+        }
+        self.monitors.with_lock(|monitors| {
+            let mut state = VirtualDesktops {
+                monitors: std::mem::take(monitors),
+                connected_monitors: self.connected_monitors.to_vec(),
+                ..Default::default()
+            };
+            let added = state.reconcile_monitors(connected);
+            *monitors = state.monitors;
+            self.connected_monitors.replace(state.connected_monitors);
+            self.replace_indexes(monitors);
+            added
+        })
+    }
+
+    fn prompt_for_monitors(&self, added: Vec<MonitorId>) {
+        if !crate::state::application::FULL_STATE
+            .load()
+            .settings
+            .share_workspaces_between_monitors
+        {
+            return;
+        }
+        for target in added {
+            workspace_prompt::show(self, target).log_error();
+        }
+    }
+
+    fn reuse_monitor_grid(
+        &self,
+        target: &MonitorId,
+        source: &MonitorId,
+        expected: &WorkspaceId,
+    ) -> Result<()> {
+        let connected = MonitorManager::instance().get_cached_ids();
+        if !connected.contains(target) || connected.contains(source) {
+            return Err("Monitor connection changed while choosing a workspace grid".into());
+        }
+        let (moved, workspace) = self.monitors.with_lock(|monitors| -> Result<_> {
+            let source_grid = monitors.get(source).ok_or("Source monitor not found")?;
+            if source_grid.active_workspace_id() != expected {
+                return Err("Workspace grid changed while choosing".into());
+            }
+            let mut state = VirtualDesktops {
+                monitors: monitors.clone(),
+                connected_monitors: MonitorManager::instance().get_cached_ids(),
+                ..Default::default()
+            };
+            let moved = state.reuse_monitor_grid(target, source)?;
+            let workspace = state.monitors[target].active_workspace_id().clone();
+            *monitors = state.monitors;
+            self.replace_indexes(monitors);
+            // Hide inactive windows from both the adopted grid and the previous grid.
+            for id in [target, source] {
+                let monitor = &monitors[id];
+                for row in monitor.workspaces.rows() {
+                    for item in row {
+                        if id == source || &item.id != monitor.active_workspace_id() {
+                            item.hide(false);
+                        }
+                    }
+                }
+            }
+            monitors[target].active_workspace().restore_on_monitor(target);
+            Ok((moved, workspace))
+        })?;
+        for window in moved {
+            Self::send(VirtualDesktopEvent::WindowMoved {
+                window,
+                desktop: workspace.clone(),
+            });
+        }
+        WorkspaceWallpapersManager::update_workspace_wallpapers_internal(self);
+        Self::send(VirtualDesktopEvent::DesktopChanged {
+            monitor: target.clone(),
+            workspace: workspace.clone(),
+        });
+        // Honor the independent synchronization setting after adopting a grid.
+        self.switch_to_id(&workspace)?;
         Ok(())
     }
 
@@ -280,47 +378,74 @@ impl VdManager {
         }
     }
 
-    /// Switch to a workspace by ID, the owning monitor is resolved from the workspace index
+    /// Switch a workspace and optionally synchronize connected monitors by grid position.
     pub fn switch_to_id(&self, workspace_id: &WorkspaceId) -> Result<()> {
-        let monitor_id = self
-            .get_monitor_of_workspace(workspace_id)
-            .ok_or("Workspace not found")?;
+        let connected = MonitorManager::instance().get_cached_ids();
+        let together = crate::state::application::FULL_STATE
+            .load()
+            .settings
+            .switch_workspaces_together;
 
         let switched = self.monitors.with_lock(|monitors| -> Result<bool> {
-            {
-                let monitor = monitors.get(&monitor_id).ok_or("Monitor not found")?;
-                if monitor.active_workspace_id() == workspace_id {
-                    log::trace!("Already on workspace {workspace_id} on monitor {monitor_id}");
-                    return Ok(false);
-                }
-            }
-
             // snapshot of the state before switching, sent along the switching event
             let snapshot = monitors.clone();
-
-            let monitor = monitors.get_mut(&monitor_id).ok_or("Monitor not found")?;
-            let previous_id = monitor.active_workspace_id().clone();
-            // Set the new active workspace before any side effect, so if it fails
-            // (e.g. destroyed meanwhile) nothing got hidden and `switching` is untouched.
-            monitor.set_active_workspace(workspace_id)?;
+            let mut state = VirtualDesktops {
+                monitors: snapshot.clone(),
+                ..Default::default()
+            };
+            let changed = state.switch_to_workspace(workspace_id, &connected, together)?;
+            if changed.is_empty() {
+                return Ok(false);
+            }
+            let source_unchanged = changed.iter().all(|(_, target)| target != workspace_id);
+            let previous_index = bridge::get_indexes(&snapshot).0;
+            *monitors = state.monitors;
+            // Synchronization may create missing rows or columns on smaller grids.
+            self.replace_indexes(monitors);
+            let created: Vec<_> = self
+                .workspace_index
+                .keys()
+                .into_iter()
+                .filter(|id| !previous_index.contains_key(id))
+                .collect();
 
             self.switching.fetch_add(1, Ordering::SeqCst);
             Self::send(VirtualDesktopEvent::SwitchingDesktop(VirtualDesktops {
-                monitors: snapshot,
+                monitors: snapshot.clone(),
                 pinned: self.pinned.to_vec(),
                 switching: true,
+                connected_monitors: self.connected_monitors.to_vec(),
+                monitor_names: self.monitor_names.to_hash_map(),
             }));
 
-            if let Some(previous) = monitor.workspaces.get_by_id(&previous_id) {
-                previous.hide(false);
+            // Hide every old workspace before restoring any new one.
+            for (id, _) in &changed {
+                if let Some(previous) = snapshot.get(id) {
+                    previous.active_workspace().hide(false);
+                }
             }
-            monitor.active_workspace().restore();
-
-            log::trace!("Switched to workspace {workspace_id} on monitor {monitor_id}");
-            Self::send(VirtualDesktopEvent::DesktopChanged {
-                monitor: monitor_id.clone(),
-                workspace: workspace_id.clone(),
-            });
+            for id in created {
+                Self::send(VirtualDesktopEvent::DesktopCreated(id));
+            }
+            for (monitor_id, target) in changed {
+                monitors[&monitor_id]
+                    .active_workspace()
+                    .restore_on_monitor(&monitor_id);
+                log::trace!("Switched to workspace {target} on monitor {monitor_id}");
+                Self::send(VirtualDesktopEvent::DesktopChanged {
+                    monitor: monitor_id,
+                    workspace: target,
+                });
+            }
+            if together && source_unchanged {
+                // Re-aligning other displays must not leave focus on another monitor.
+                if let Some((id, monitor)) = monitors
+                    .iter()
+                    .find(|(_, monitor)| monitor.active_workspace_id() == workspace_id)
+                {
+                    monitor.active_workspace().restore_on_monitor(id);
+                }
+            }
             Ok(true)
         })?;
 
@@ -469,7 +594,7 @@ impl VdManager {
                 // Windows that landed on the active workspace coming from a hidden one
                 // are still minimized, and if the active changed its own windows too.
                 if active_changed || moved_windows.iter().any(|(_, target)| target == &active.id) {
-                    active.restore();
+                    active.restore_on_monitor(&monitor_id);
                 }
 
                 let new_active = active_changed.then(|| active.id.clone());
@@ -511,9 +636,52 @@ impl VdManager {
 pub trait DesktopWorkspaceExt {
     fn hide(&self, force: bool);
     fn restore(&self);
+    fn restore_on_monitor(&self, monitor_id: &MonitorId);
 }
 
 impl DesktopWorkspaceExt for DesktopWorkspace {
+    fn restore_on_monitor(&self, monitor_id: &MonitorId) {
+        self.restore();
+        if !crate::state::application::FULL_STATE
+            .load()
+            .settings
+            .share_workspaces_between_monitors
+        {
+            return;
+        }
+        // Windows can leave undocked windows on a remaining laptop display. Move
+        // restored windows to their replacement without unminimizing user-minimized ones.
+        let Ok(monitors) = MonitorEnumerator::enumerate_win32() else {
+            return;
+        };
+        let Some(target) = monitors
+            .into_iter()
+            .find(|monitor| monitor.stable_id().ok().as_ref() == Some(monitor_id))
+            .and_then(|monitor| monitor.rect().ok())
+        else {
+            return;
+        };
+        for addr in &self.windows {
+            let window = Window::from(*addr);
+            if window.is_minimized() || window.monitor().stable_id().ok().as_ref() == Some(monitor_id) {
+                continue;
+            }
+            if let Ok(rect) = window.outer_rect() {
+                let width = rect.width().clamp(1, target.width().max(1));
+                let height = rect.height().clamp(1, target.height().max(1));
+                let destination = RECT {
+                    left: target.left,
+                    top: target.top,
+                    right: target.left + width,
+                    bottom: target.top + height,
+                };
+                window
+                    .set_position(&destination, SWP_NOACTIVATE | SWP_NOZORDER)
+                    .log_error();
+            }
+        }
+    }
+
     fn hide(&self, force: bool) {
         let mode = if force { SW_FORCEMINIMIZE } else { SW_MINIMIZE };
         for addr in &self.windows {
@@ -596,6 +764,15 @@ impl VdManager {
             // Restore workspace if the window was unminimized by the user via alt+tab or others
             manager.switch_to_id(&workspace_id)?;
         } else {
+            if crate::state::application::FULL_STATE
+                .load()
+                .settings
+                .share_workspaces_between_monitors
+            {
+                // Keep the assignment while undocked so the replacement inherits it.
+                MINIMIZED_BY_WORKSPACES.remove_sync(&window_id);
+                return Ok(());
+            }
             // The workspace's monitor is disconnected, switching there would hide
             // windows that are now visible on other monitors. Instead only this
             // window is moved to the active workspace of the monitor it's shown on.
@@ -655,10 +832,6 @@ impl VdManager {
                     return Ok(());
                 }
 
-                let Ok(current_monitor_id) = window.monitor().stable_id() else {
-                    return Ok(());
-                };
-
                 // Find the monitor whose workspace bookkeeping currently owns this window.
                 let recorded_monitor_id = manager.monitors.with_lock(|monitors| {
                     monitors.iter().find_map(|(monitor_id, monitor)| {
@@ -675,9 +848,28 @@ impl VdManager {
                     return Ok(());
                 };
 
+                // Read the physical monitor after waiting for the bookkeeping lock:
+                // docking may have relocated the window while we were waiting.
+                let Ok(current_monitor_id) = window.monitor().stable_id() else {
+                    return Ok(());
+                };
+
                 // Window's physical monitor still matches its workspace's monitor, as it
                 // should be, so this is just a regular rect change, not a monitor move.
                 if recorded_monitor_id == current_monitor_id {
+                    return Ok(());
+                }
+
+                if crate::state::application::FULL_STATE
+                    .load()
+                    .settings
+                    .share_workspaces_between_monitors
+                    && !MonitorManager::instance()
+                        .get_cached_ids()
+                        .contains(&recorded_monitor_id)
+                {
+                    // Windows relocates windows when a display is unplugged. Preserve
+                    // their workspace membership until the replacement is attached.
                     return Ok(());
                 }
 

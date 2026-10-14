@@ -15,9 +15,118 @@ pub struct VirtualDesktops {
     pub pinned: Vec<isize>,
     /// true if the system is currently switching workspaces
     pub switching: bool,
+    /// Most recently connected displays, used to avoid duplicate connection prompts.
+    pub connected_monitors: Vec<MonitorId>,
+    /// Friendly display names, including disconnected displays offered for reuse.
+    pub monitor_names: HashMap<MonitorId, String>,
 }
 
 impl VirtualDesktops {
+    /// Switch by grid position across connected displays when synchronization is enabled.
+    /// Grow smaller grids so every display can reach the requested position; each
+    /// display retains its own workspace IDs and windows.
+    pub fn switch_to_workspace(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        connected: &[MonitorId],
+        together: bool,
+    ) -> Result<Vec<(MonitorId, WorkspaceId)>> {
+        let (source, (row, column)) = self
+            .monitors
+            .iter()
+            .find_map(|(id, monitor)| {
+                monitor
+                    .workspaces
+                    .position(workspace_id)
+                    .map(|position| (id.clone(), position))
+            })
+            .ok_or("Workspace not found")?;
+        let mut targets = if together {
+            connected.to_vec()
+        } else {
+            Vec::new()
+        };
+        targets.retain(|id| id != &source && self.monitors.contains_key(id));
+        targets.sort_by(|a, b| a.0.cmp(&b.0));
+        targets.dedup();
+        // Restore the initiating display last so keyboard focus stays there.
+        targets.push(source);
+        let mut changed = Vec::new();
+        for id in targets {
+            let monitor = self.monitors.get_mut(&id).expect("target monitor exists");
+            while monitor.workspaces.row_count() <= row {
+                monitor.workspaces.add_row();
+            }
+            while monitor.workspaces.column_count() <= column {
+                monitor.workspaces.add_column();
+            }
+            let target = monitor.workspaces.get(row, column).unwrap().id.clone();
+            if monitor.active_workspace_id() != &target {
+                monitor.set_active_workspace(&target)?;
+                changed.push((id, target));
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Ensure each connected display has a grid. Never choose a source automatically.
+    /// Return newly connected displays for the infrastructure to prompt, if enabled.
+    pub fn reconcile_monitors(&mut self, mut connected: Vec<MonitorId>) -> Vec<MonitorId> {
+        connected.sort_by(|a, b| a.0.cmp(&b.0));
+        connected.dedup();
+        let added = connected
+            .iter()
+            .cloned()
+            .filter(|id| !self.connected_monitors.contains(id))
+            .collect();
+        for target in &connected {
+            self.monitors
+                .entry(target.clone())
+                .or_insert_with(VirtualDesktopMonitor::create);
+        }
+        self.connected_monitors = connected;
+        added
+    }
+
+    pub fn reusable_monitor_grids(&self, connected: &[MonitorId]) -> Vec<MonitorId> {
+        let mut sources: Vec<_> = self
+            .monitors
+            .keys()
+            .filter(|id| !connected.contains(id))
+            .cloned()
+            .collect();
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        sources
+    }
+
+    /// Explicitly selected reuse: swap grids without duplicating workspace IDs.
+    /// Keep currently visible windows on the target's adopted active workspace.
+    /// The target's previous grid remains saved under the disconnected source ID.
+    pub fn reuse_monitor_grid(
+        &mut self,
+        target: &MonitorId,
+        source: &MonitorId,
+    ) -> Result<Vec<isize>> {
+        if target == source
+            || !self.monitors.contains_key(target)
+            || !self.monitors.contains_key(source)
+            || !self.connected_monitors.contains(target)
+            || self.connected_monitors.contains(source)
+        {
+            return Err("Invalid workspace grid selection".into());
+        }
+        let mut adopted = self.monitors.remove(source).unwrap();
+        let mut previous = self.monitors.remove(target).unwrap();
+        let windows = std::mem::take(&mut previous.active_workspace_mut().windows);
+        adopted
+            .active_workspace_mut()
+            .windows
+            .extend(windows.iter().copied());
+        self.monitors.insert(target.clone(), adopted);
+        self.monitors.insert(source.clone(), previous);
+        Ok(windows)
+    }
+
     pub fn sanitize(&mut self) {
         let mut seen = HashSet::new();
         self.pinned.retain(|x| seen.insert(*x));
@@ -369,3 +478,215 @@ impl DesktopWorkspace {
 pub struct WorkspaceId(pub String);
 
 identifier_impl!(WorkspaceId, String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(name: &str) -> MonitorId {
+        MonitorId(name.to_owned())
+    }
+
+    fn home_state() -> VirtualDesktops {
+        let mut home = VirtualDesktopMonitor::create();
+        let email = home.add_workspace_column();
+        home.rename_workspace(&email, Some("Email".into())).unwrap();
+        home.set_active_workspace(&email).unwrap();
+        home.active_workspace_mut().windows.push(42);
+        VirtualDesktops {
+            monitors: HashMap::from([(id("home"), home)]),
+            connected_monitors: vec![id("home")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn connecting_monitor_never_automatically_reuses_a_grid() {
+        let mut state = home_state();
+        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
+        assert_eq!(state.reconcile_monitors(vec![id("work")]), vec![id("work")]);
+        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &home_id);
+        assert_ne!(state.monitors[&id("work")].active_workspace_id(), &home_id);
+        assert_eq!(state.reusable_monitor_grids(&[id("work")]), vec![id("home")]);
+    }
+
+    #[test]
+    fn explicit_reuse_keeps_the_selected_grid_and_currently_visible_windows() {
+        let mut state = home_state();
+        state.monitors.get_mut(&id("home")).unwrap().add_workspace_row();
+        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
+        state.reconcile_monitors(vec![id("work")]);
+        let work = state.monitors.get_mut(&id("work")).unwrap();
+        let work_id = work.active_workspace_id().clone();
+        work.active_workspace_mut().windows.push(99);
+        assert_eq!(state.reuse_monitor_grid(&id("work"), &id("home")).unwrap(), vec![99]);
+        let adopted = &state.monitors[&id("work")];
+        assert_eq!(adopted.active_workspace_id(), &home_id);
+        assert_eq!(adopted.active_workspace().name.as_deref(), Some("Email"));
+        assert_eq!(adopted.workspaces.row_count(), 2);
+        assert_eq!(adopted.workspaces.column_count(), 2);
+        assert_eq!(adopted.active_workspace().windows, vec![42, 99]);
+        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &work_id);
+        assert!(state.monitors[&id("home")].active_workspace().windows.is_empty());
+        let mut ids = HashSet::new();
+        for monitor in state.monitors.values() {
+            for workspace in monitor.workspaces.rows().iter().flatten() {
+                assert!(ids.insert(workspace.id.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn keeping_separate_grids_preserves_existing_monitor_configuration() {
+        let mut state = home_state();
+        state.reconcile_monitors(vec![id("work")]);
+        let work = serde_json::to_value(&state.monitors[&id("work")]).unwrap();
+        state.reconcile_monitors(vec![id("home")]);
+        state.reconcile_monitors(vec![id("work")]);
+        assert_eq!(serde_json::to_value(&state.monitors[&id("work")]).unwrap(), work);
+    }
+
+    #[test]
+    fn returning_home_requires_an_explicit_choice_and_keeps_latest_edits() {
+        let mut state = home_state();
+        state.reconcile_monitors(vec![id("work")]);
+        state.reuse_monitor_grid(&id("work"), &id("home")).unwrap();
+        let added = state.monitors.get_mut(&id("work")).unwrap().add_workspace_column();
+        state.reconcile_monitors(vec![id("home")]);
+        assert!(!state.monitors[&id("home")].workspaces.contains(&added));
+        state.reuse_monitor_grid(&id("home"), &id("work")).unwrap();
+        assert!(state.monitors[&id("home")].workspaces.contains(&added));
+    }
+
+    #[test]
+    fn restarting_with_changed_monitors_offers_saved_disconnected_grids() {
+        let mut state = home_state();
+        state.monitor_names.insert(id("home"), "Home display".into());
+        state.reconcile_monitors(vec![]);
+        let mut restarted: VirtualDesktops =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restarted.reconcile_monitors(vec![id("work")]), vec![id("work")]);
+        assert_eq!(restarted.reusable_monitor_grids(&[id("work")]), vec![id("home")]);
+        assert_eq!(restarted.monitor_names[&id("home")], "Home display");
+    }
+
+    #[test]
+    fn repeated_notifications_do_not_repeat_connection_prompts() {
+        let mut state = home_state();
+        assert_eq!(state.reconcile_monitors(vec![id("work")]), vec![id("work")]);
+        assert!(state.reconcile_monitors(vec![id("work")]).is_empty());
+        let json = serde_json::to_string(&state).unwrap();
+        let mut restarted: VirtualDesktops = serde_json::from_str(&json).unwrap();
+        assert!(restarted.reconcile_monitors(vec![id("work")]).is_empty());
+    }
+
+    #[test]
+    fn connected_monitors_are_not_offered_for_reuse() {
+        let mut state = home_state();
+        state.monitors.insert(id("old"), VirtualDesktopMonitor::create());
+        state.reconcile_monitors(vec![id("home"), id("work")]);
+        assert_eq!(state.reusable_monitor_grids(&[id("home"), id("work")]), vec![id("old")]);
+    }
+
+    #[test]
+    fn invalid_reuse_does_not_change_any_grid() {
+        let mut state = home_state();
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(state.reuse_monitor_grid(&id("home"), &id("home")).is_err());
+        assert!(state.reuse_monitor_grid(&id("missing"), &id("home")).is_err());
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn source_reconnecting_before_choice_cannot_have_its_grid_reused() {
+        let mut state = home_state();
+        state.reconcile_monitors(vec![id("work")]);
+        state.reconcile_monitors(vec![id("home"), id("work")]);
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(state.reuse_monitor_grid(&id("work"), &id("home")).is_err());
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn old_cache_files_keep_grids_until_the_user_chooses() {
+        let mut json = serde_json::to_value(home_state()).unwrap();
+        json.as_object_mut().unwrap().remove("connectedMonitors");
+        json.as_object_mut().unwrap().remove("monitorNames");
+        let mut state: VirtualDesktops = serde_json::from_value(json).unwrap();
+        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
+        state.reconcile_monitors(vec![id("work")]);
+        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &home_id);
+        assert_ne!(state.monitors[&id("work")].active_workspace_id(), &home_id);
+    }
+
+    #[test]
+    fn synchronized_switch_grows_connected_grids_and_preserves_disconnected_grids() {
+        let mut state = home_state();
+        let source = state.monitors.get_mut(&id("home")).unwrap();
+        let target = source.add_workspace_row();
+        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
+        state.monitors.insert(id("offline"), VirtualDesktopMonitor::create());
+        let offline = serde_json::to_value(&state.monitors[&id("offline")]).unwrap();
+        let changed = state
+            .switch_to_workspace(&target, &[id("home"), id("laptop")], true)
+            .unwrap();
+        assert_eq!(changed.last(), Some(&(id("home"), target)));
+        let laptop = &state.monitors[&id("laptop")];
+        assert_eq!(laptop.workspaces.position(laptop.active_workspace_id()), Some((1, 1)));
+        assert_eq!(laptop.workspaces.row_count(), 2);
+        assert_eq!(laptop.workspaces.column_count(), 2);
+        assert_eq!(serde_json::to_value(&state.monitors[&id("offline")]).unwrap(), offline);
+        // Each monitor has its own IDs and windows even when their positions match.
+        assert_ne!(laptop.active_workspace_id(), state.monitors[&id("home")].active_workspace_id());
+        assert!(laptop.active_workspace().windows.is_empty());
+    }
+
+    #[test]
+    fn independent_switch_does_not_change_other_monitors() {
+        let mut state = home_state();
+        let target = state.monitors[&id("home")].workspaces.get(0, 0).unwrap().id.clone();
+        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
+        let laptop = serde_json::to_value(&state.monitors[&id("laptop")]).unwrap();
+        let changed = state
+            .switch_to_workspace(&target, &[id("home"), id("laptop")], false)
+            .unwrap();
+        assert_eq!(changed, vec![(id("home"), target)]);
+        assert_eq!(serde_json::to_value(&state.monitors[&id("laptop")]).unwrap(), laptop);
+    }
+
+    #[test]
+    fn synchronized_switch_aligns_other_monitors_even_when_source_is_already_active() {
+        let mut state = home_state();
+        let target = state.monitors[&id("home")].active_workspace_id().clone();
+        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
+        let connected = [id("home"), id("laptop")];
+        let changed = state.switch_to_workspace(&target, &connected, true).unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, id("laptop"));
+        assert!(state.switch_to_workspace(&target, &connected, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn synchronized_switch_and_portability_can_be_combined() {
+        let mut state = home_state();
+        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
+        state.connected_monitors.push(id("laptop"));
+        let target = state.monitors[&id("home")].active_workspace_id().clone();
+        state.reconcile_monitors(vec![id("work"), id("laptop")]);
+        state.reuse_monitor_grid(&id("work"), &id("home")).unwrap();
+        state.switch_to_workspace(&target, &[id("work"), id("laptop")], true).unwrap();
+        for monitor_id in [id("work"), id("laptop")] {
+            let monitor = &state.monitors[&monitor_id];
+            assert_eq!(monitor.workspaces.position(monitor.active_workspace_id()), Some((0, 1)));
+        }
+        assert_eq!(state.monitors[&id("work")].active_workspace().windows, vec![42]);
+    }
+
+    #[test]
+    fn invalid_switch_leaves_every_monitor_unchanged() {
+        let mut state = home_state();
+        let snapshot = serde_json::to_value(&state).unwrap();
+        assert!(state.switch_to_workspace(&WorkspaceId("missing".into()), &[id("home")], true).is_err());
+        assert_eq!(serde_json::to_value(&state).unwrap(), snapshot);
+    }
+}

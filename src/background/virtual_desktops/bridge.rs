@@ -48,6 +48,8 @@ impl From<VirtualDesktops> for VdManager {
         Self {
             monitors: SyncHashMap::from(value.monitors),
             pinned: SyncVec::from(value.pinned),
+            connected_monitors: SyncVec::from(value.connected_monitors),
+            monitor_names: SyncHashMap::from(value.monitor_names),
             switching: AtomicU32::new(0),
             workspace_index: SyncHashMap::from(workspace_index),
             window_index: SyncHashMap::from(window_index),
@@ -57,11 +59,13 @@ impl From<VirtualDesktops> for VdManager {
 
 impl From<&VdManager> for VirtualDesktops {
     fn from(value: &VdManager) -> Self {
-        Self {
-            monitors: value.monitors.to_hash_map(),
+        value.monitors.with_lock(|monitors| Self {
+            monitors: monitors.clone(),
             pinned: value.pinned.to_vec(),
             switching: value.switching.load(Ordering::SeqCst) > 0,
-        }
+            connected_monitors: value.connected_monitors.to_vec(),
+            monitor_names: value.monitor_names.to_hash_map(),
+        })
     }
 }
 
