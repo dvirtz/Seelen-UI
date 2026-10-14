@@ -21,6 +21,8 @@ use seelen_core::{
 };
 use slu_utils::{Debounce, debounce};
 
+const WORKSPACES_CACHE_FILE: &str = "workspaces3.json";
+
 pub fn get_indexes(
     state: &VirtualDesktops,
 ) -> (HashMap<WorkspaceId, MonitorId>, HashMap<isize, WorkspaceId>) {
@@ -60,14 +62,20 @@ impl From<&VdManager> for VirtualDesktops {
 }
 
 pub fn load_stored() -> Result<VirtualDesktops> {
-    let path = SEELEN_COMMON.app_cache_dir().join("workspaces2.json");
+    let cache_dir = SEELEN_COMMON.app_cache_dir();
+    let normalized = cache_dir.join(WORKSPACES_CACHE_FILE);
+    let path = if normalized.exists() {
+        normalized
+    } else {
+        cache_dir.join("workspaces2.json")
+    };
     let file = std::fs::File::open(path)?;
     file.lock()?;
     Ok(serde_json::from_reader(file)?)
 }
 
 fn save_state() -> Result<()> {
-    let path = SEELEN_COMMON.app_cache_dir().join("workspaces2.json");
+    let path = SEELEN_COMMON.app_cache_dir().join(WORKSPACES_CACHE_FILE);
     let state: VirtualDesktops = VdManager::instance().into();
 
     let mut file = std::fs::File::create(path)?;

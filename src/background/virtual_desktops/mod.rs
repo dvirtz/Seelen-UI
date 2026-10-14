@@ -201,6 +201,7 @@ impl VdManager {
                     workspace.hide(false);
                 }
             }
+            self.restore_visible(&state);
             self.restore_workspace_in(&state, &workspace);
             (moved, workspace)
         };

@@ -129,7 +129,12 @@ impl VirtualDesktops {
         let mut moved = Vec::new();
         // Preserve windows from every displaced cell, including hidden cells.
         for id in previous.workspaces.rows().iter().flatten() {
-            if !adopted.workspaces.contains(id) {
+            if !adopted.workspaces.contains(id)
+                && self
+                    .monitors_for_workspace(id)
+                    .iter()
+                    .all(|owner| owner == target)
+            {
                 if let Some(workspace) = self.workspaces.get_mut(id) {
                     moved.append(&mut workspace.windows);
                 }
@@ -606,6 +611,23 @@ mod tests {
         let id = state.monitors[&monitor("new")].active_workspace_id();
         assert!(state.workspaces[id].windows.contains(&77));
     }
+    #[test]
+    fn relinking_one_monitor_preserves_another_grids_shared_windows() {
+        let mut state = shared();
+        let old = state.monitors[&monitor("work")]
+            .active_workspace_id()
+            .clone();
+        state.workspaces.get_mut(&old).unwrap().windows.push(42);
+        state.ensure_monitor(monitor("other"));
+        let moved = state
+            .reuse_monitor_grid(&monitor("work"), &monitor("other"))
+            .unwrap();
+        assert!(moved.is_empty());
+        assert_eq!(state.workspaces[&old].windows, vec![42]);
+        assert!(state.monitors[&monitor("home")].workspaces.contains(&old));
+        assert!(!state.monitors[&monitor("work")].workspaces.contains(&old));
+    }
+
     #[test]
     fn old_nested_files_are_migrated_without_changing_ids_or_windows() {
         let id = WorkspaceId("existing".into());

@@ -27,7 +27,7 @@ resolved using the first connected owner in hardware ID order (or the first save
 
 ## Inspecting the saved configuration
 
-The file is `%LOCALAPPDATA%\com.seelen.seelen-ui\workspaces2.json`. Monitor grids contain IDs; definitions are stored
+The file is `%LOCALAPPDATA%\com.seelen.seelen-ui\workspaces3.json`. Monitor grids contain IDs; definitions are stored
 once in the top-level `workspaces` registry:
 
 ```json
@@ -68,10 +68,10 @@ once in the top-level `workspaces` registry:
 }
 ```
 
-Older files with objects nested under monitor grids are migrated on load. Workspace IDs, metadata, active selections,
-and windows are retained; duplicate window handles are removed. Missing definitions and empty or malformed grids are
-repaired. The next save writes the normalized format. Inspect the file while Seelen is running, but exit Seelen before
-manually editing it because it saves changes automatically.
+If the new file does not exist, the old `workspaces2.json` is migrated on load. Workspace IDs, metadata, active
+selections, and windows are retained; duplicate window handles are removed. Missing definitions and empty or malformed
+grids are repaired. The next save writes `workspaces3.json`, leaving the old file intact for older builds. Inspect the
+file while Seelen is running, but exit Seelen before manually editing it because it saves changes automatically.
 
 ## Validation
 
