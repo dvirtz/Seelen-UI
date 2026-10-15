@@ -73,6 +73,21 @@ selections, and windows are retained; duplicate window handles are removed. Miss
 grids are repaired. The next save writes `workspaces3.json`, leaving the old file intact for older builds. Inspect the
 file while Seelen is running, but exit Seelen before manually editing it because it saves changes automatically.
 
+## Widget API compatibility
+
+`get_virtual_desktops` and `virtual-desktops::changed` preserve the existing widget API: each monitor's `workspaces`
+property contains rows of complete workspace definitions, including names and windows. This property is computed from
+the canonical registry when producing a response or event; it is not stored as another set of definitions.
+
+New consumers can use `monitor.workspaceIds` for the ID grid and resolve entries through the top-level `workspaces`
+registry. Both grids have the same row/column order, and `active_workspace` remains the active workspace ID. Shared
+monitors resolve their definitions from the same registry. JSON carries snapshots, so changing an object in a widget
+does not mutate backend state; continue using workspace commands to make changes.
+
+The generated TypeScript names `VirtualDesktops`, `VirtualDesktopMonitor`, and `WorkspaceGrid` describe this compatible
+API shape. `WorkspaceState`, `WorkspaceMonitor`, and `WorkspaceIdGrid` describe the normalized storage model. The saved
+JSON format above remains unchanged.
+
 ## Validation
 
 Regression tests cover migration, shared references, window membership, changes to offline grids, shared activation,

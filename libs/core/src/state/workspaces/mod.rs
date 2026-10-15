@@ -9,6 +9,10 @@ use crate::{error::Result, identifier_impl, resource::WallpaperId, system_state:
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), ts(export))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(rename = "WorkspaceState")
+)]
 pub struct VirtualDesktops {
     pub monitors: HashMap<MonitorId, VirtualDesktopMonitor>,
     /// Authoritative definitions and window membership, stored once per workspace ID.
@@ -418,8 +422,88 @@ impl<'de> Deserialize<'de> for VirtualDesktops {
     }
 }
 
+/// Public API projection. Keep the legacy definition grids out of persisted state.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(export, rename = "VirtualDesktops")
+)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualDesktopsView {
+    pub monitors: HashMap<MonitorId, VirtualDesktopMonitorView>,
+    pub workspaces: HashMap<WorkspaceId, DesktopWorkspace>,
+    pub pinned: Vec<isize>,
+    pub switching: bool,
+    pub connected_monitors: Vec<MonitorId>,
+    pub monitor_names: HashMap<MonitorId, String>,
+}
+
+impl From<VirtualDesktops> for VirtualDesktopsView {
+    fn from(state: VirtualDesktops) -> Self {
+        let monitors = state
+            .monitors
+            .into_iter()
+            .map(|(id, monitor)| {
+                let workspaces = monitor
+                    .workspaces
+                    .rows()
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .filter_map(|id| state.workspaces.get(id).cloned())
+                            .collect()
+                    })
+                    .collect();
+                (
+                    id,
+                    VirtualDesktopMonitorView {
+                        workspaces: WorkspaceDefinitionGrid(workspaces),
+                        workspace_ids: monitor.workspaces,
+                        active_workspace: monitor.active_workspace,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            monitors,
+            workspaces: state.workspaces,
+            pinned: state.pinned,
+            switching: state.switching,
+            connected_monitors: state.connected_monitors,
+            monitor_names: state.monitor_names,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(export, rename = "VirtualDesktopMonitor")
+)]
+pub struct VirtualDesktopMonitorView {
+    /// Computed definitions for existing widgets; never another source of state.
+    pub workspaces: WorkspaceDefinitionGrid,
+    #[serde(rename = "workspaceIds")]
+    pub workspace_ids: WorkspaceGrid,
+    pub active_workspace: WorkspaceId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(export, rename = "WorkspaceGrid")
+)]
+pub struct WorkspaceDefinitionGrid(Vec<Vec<DesktopWorkspace>>);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(rename = "WorkspaceMonitor")
+)]
 pub struct VirtualDesktopMonitor {
     pub workspaces: WorkspaceGrid,
     active_workspace: WorkspaceId,
@@ -442,6 +526,10 @@ impl VirtualDesktopMonitor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
+#[cfg_attr(
+    all(feature = "gen-binds", not(feature = "salvo")),
+    ts(rename = "WorkspaceIdGrid")
+)]
 pub struct WorkspaceGrid(Vec<Vec<WorkspaceId>>);
 
 impl WorkspaceGrid {
@@ -556,6 +644,37 @@ mod tests {
         let restored: VirtualDesktops = serde_json::from_value(json).unwrap();
         assert_eq!(restored.workspaces[&id].name.as_deref(), Some("Coding"));
         assert_eq!(restored.workspaces[&id].windows, vec![42]);
+    }
+    #[test]
+    fn api_preserves_legacy_definition_grids_without_denormalizing_storage() {
+        let mut state = shared();
+        let id = state.monitors[&monitor("home")]
+            .active_workspace_id()
+            .clone();
+        state.workspaces.get_mut(&id).unwrap().name = Some("Coding".into());
+        state.workspaces.get_mut(&id).unwrap().windows = vec![42];
+        let view = serde_json::to_value(VirtualDesktopsView::from(state.clone())).unwrap();
+        for owner in ["home", "work"] {
+            let monitor = &view["monitors"][owner];
+            assert_eq!(monitor["active_workspace"], id.0);
+            assert_eq!(monitor["workspaceIds"][0][0], id.0);
+            assert_eq!(monitor["workspaces"][0][0], view["workspaces"][&id.0]);
+            assert_eq!(monitor["workspaces"][0][0]["name"], "Coding");
+            assert_eq!(
+                monitor["workspaces"][0][0]["windows"],
+                serde_json::json!([42])
+            );
+        }
+        // Derive each response from the current registry, without cached copies.
+        state.workspaces.get_mut(&id).unwrap().name = Some("Updated".into());
+        let updated = serde_json::to_value(VirtualDesktopsView::from(state.clone())).unwrap();
+        assert_eq!(
+            updated["monitors"]["work"]["workspaces"][0][0]["name"],
+            "Updated"
+        );
+        let stored = serde_json::to_value(state).unwrap();
+        assert_eq!(stored["monitors"]["home"]["workspaces"][0][0], id.0);
+        assert!(stored["monitors"]["home"].get("workspaceIds").is_none());
     }
     #[test]
     fn edits_propagate_to_offline_references() {
