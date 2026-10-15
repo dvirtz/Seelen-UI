@@ -1,8 +1,8 @@
 # Shared workspaces across monitor setups
 
-Under **Settings > General**, enable **Share workspaces between monitors** to choose an existing grid when connecting a
-monitor. The prompt lists disconnected monitors, workspace counts, and workspace names. Choose a grid to reuse, or
-**Keep separate workspaces**. Dismissing the prompt keeps the monitor's separate grid.
+Under **Settings > Monitors > Workspaces**, enable **Share workspaces between monitors** to choose an existing grid when
+connecting a monitor. The prompt lists disconnected monitors, workspace counts, and workspace names. Choose a grid to
+reuse, or **Keep separate workspaces**. Dismissing the prompt keeps the monitor's separate grid.
 
 Reusing a grid links the monitors to the same workspace IDs. It does not swap their grids or copy workspace definitions.
 Each workspace has one name, icon, wallpaper, window list, and associated tiling tree. Adding or removing a row or
@@ -24,6 +24,25 @@ and independent grids switch to the corresponding position.
 
 Monitor-specific settings remain associated with monitor IDs. A shared workspace has one wallpaper; its collection is
 resolved using the first connected owner in hardware ID order (or the first saved owner while disconnected).
+
+## Managing monitor grids in settings
+
+**Settings > Monitors > Workspaces** lists every saved monitor with its connection status, grid, active workspace, and
+the monitors sharing that grid. Hardware IDs distinguish displays with the same name. The sharing prompt and
+switch-together options live here; use the settings Save button to save those options.
+
+Grid assignments and workspace edits apply immediately:
+
+- Choose another monitor and select **Use this grid** to share its definitions, including between two connected monitors
+  or when preparing a disconnected monitor. The automatic connection prompt still offers disconnected sources only.
+- **Create separate grid** assigns a new grid containing one workspace. Windows belonging only to the displaced grid
+  move into it; windows in a grid still shared by another monitor stay with that grid. Unreferenced old definitions
+  remain in the registry.
+- Select a workspace to rename it, activate it on a connected monitor, or remove its column (or its row when there is
+  only one column). Windows from removed cells move to neighboring workspaces; the last cell cannot be removed.
+- **Add column** and **Add row** grow the grid, including for disconnected monitors. Grid edits and renames affect every
+  monitor sharing those workspace IDs. Editing a disconnected monitor does not activate a different workspace on
+  connected monitors.
 
 ## Inspecting the saved configuration
 

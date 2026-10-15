@@ -193,6 +193,13 @@ pub(super) fn show(manager: &VdManager, target: MonitorId) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn dismiss(target: &MonitorId) {
+    let prompt = PROMPTS.lock().remove(target);
+    if let Some(prompt) = prompt {
+        prompt.close();
+    }
+}
+
 pub(super) fn retain_connected() {
     let connected = MonitorManager::instance().get_cached_ids();
     let enabled = FULL_STATE.load().settings.share_workspaces_between_monitors;

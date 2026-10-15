@@ -117,16 +117,32 @@ impl VirtualDesktops {
         {
             return Err("Invalid workspace grid selection".into());
         }
-        let adopted = self
-            .monitors
-            .get(source)
-            .ok_or("Source monitor not found")?
-            .clone();
+        self.set_monitor_workspace_grid(target, Some(source))
+    }
+
+    /// Explicit settings assignment supports connected and saved monitors alike.
+    /// `None` creates a new independent grid, leaving existing definitions intact.
+    pub fn set_monitor_workspace_grid(
+        &mut self,
+        target: &MonitorId,
+        source: Option<&MonitorId>,
+    ) -> Result<Vec<isize>> {
         let previous = self
             .monitors
             .get(target)
             .ok_or("Target monitor not found")?
             .clone();
+        if source == Some(target) {
+            return Err("Cannot assign a monitor to itself".into());
+        }
+        let adopted = match source {
+            Some(source) => self
+                .monitors
+                .get(source)
+                .ok_or("Source monitor not found")?
+                .clone(),
+            None => VirtualDesktopMonitor::create(self.new_workspace()),
+        };
         if !self.workspaces.contains_key(adopted.active_workspace_id()) {
             return Err("Active workspace not found".into());
         }
@@ -644,6 +660,101 @@ mod tests {
         let restored: VirtualDesktops = serde_json::from_value(json).unwrap();
         assert_eq!(restored.workspaces[&id].name.as_deref(), Some("Coding"));
         assert_eq!(restored.workspaces[&id].windows, vec![42]);
+    }
+    #[test]
+    fn settings_can_link_connected_monitors_without_changing_automatic_prompt_rules() {
+        let mut state = shared();
+        state.ensure_monitor(monitor("other"));
+        state.reconcile_monitors(vec![monitor("home"), monitor("work"), monitor("other")]);
+        assert!(
+            state
+                .reuse_monitor_grid(&monitor("other"), &monitor("home"))
+                .is_err()
+        );
+        state
+            .set_monitor_workspace_grid(&monitor("other"), Some(&monitor("home")))
+            .unwrap();
+        assert_eq!(
+            state.monitors[&monitor("other")].workspaces,
+            state.monitors[&monitor("home")].workspaces
+        );
+    }
+    #[test]
+    fn settings_can_assign_a_disconnected_monitor_without_switching_connected_monitors() {
+        let mut state = shared();
+        state.ensure_monitor(monitor("other"));
+        let active = state.monitors[&monitor("work")]
+            .active_workspace_id()
+            .clone();
+        state
+            .set_monitor_workspace_grid(&monitor("home"), Some(&monitor("other")))
+            .unwrap();
+        assert_eq!(
+            state.monitors[&monitor("work")].active_workspace_id(),
+            &active
+        );
+        assert_eq!(
+            state.monitors[&monitor("home")].workspaces,
+            state.monitors[&monitor("other")].workspaces
+        );
+    }
+    #[test]
+    fn separate_grid_keeps_windows_in_their_existing_shared_grid() {
+        let mut state = shared();
+        let old = state.monitors[&monitor("work")]
+            .active_workspace_id()
+            .clone();
+        state.workspaces.get_mut(&old).unwrap().windows = vec![42];
+        let moved = state
+            .set_monitor_workspace_grid(&monitor("work"), None)
+            .unwrap();
+        let new = state.monitors[&monitor("work")].active_workspace_id();
+        assert_ne!(new, &old);
+        assert!(moved.is_empty());
+        assert!(state.workspaces[new].windows.is_empty());
+        assert_eq!(state.workspaces[&old].windows, vec![42]);
+        assert_eq!(state.monitors[&monitor("home")].active_workspace_id(), &old);
+    }
+    #[test]
+    fn separate_grid_preserves_windows_from_all_exclusive_cells() {
+        let mut state = VirtualDesktops::default();
+        state.ensure_monitor(monitor("home"));
+        let active = state.monitors[&monitor("home")]
+            .active_workspace_id()
+            .clone();
+        let hidden = state.create_workspace(&monitor("home"), false).unwrap();
+        state.workspaces.get_mut(&active).unwrap().windows = vec![42];
+        state.workspaces.get_mut(&hidden).unwrap().windows = vec![43];
+        state
+            .set_monitor_workspace_grid(&monitor("home"), None)
+            .unwrap();
+        let new = state.monitors[&monitor("home")].active_workspace_id();
+        let mut windows = state.workspaces[new].windows.clone();
+        windows.sort();
+        assert_eq!(windows, vec![42, 43]);
+        assert!(state.workspaces[&active].windows.is_empty());
+        assert!(state.workspaces[&hidden].windows.is_empty());
+    }
+    #[test]
+    fn invalid_settings_assignments_leave_state_unchanged() {
+        let mut state = shared();
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(
+            state
+                .set_monitor_workspace_grid(&monitor("missing"), None)
+                .is_err()
+        );
+        assert!(
+            state
+                .set_monitor_workspace_grid(&monitor("work"), Some(&monitor("missing")))
+                .is_err()
+        );
+        assert!(
+            state
+                .set_monitor_workspace_grid(&monitor("work"), Some(&monitor("work")))
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
     }
     #[test]
     fn api_preserves_legacy_definition_grids_without_denormalizing_storage() {

@@ -126,6 +126,9 @@ macro_rules! slu_commands_declaration {
 slu_commands_declaration! {
     // virtual desktops
     StateGetVirtualDesktops = get_virtual_desktops() -> VirtualDesktopsView,
+    SetMonitorWorkspaceGrid =
+        @fallible()
+        set_monitor_workspace_grid(monitor_id: MonitorId, source_monitor_id: Option<MonitorId>),
     SwitchWorkspace =
         @fallible()
         switch_workspace(workspace_id: WorkspaceId),

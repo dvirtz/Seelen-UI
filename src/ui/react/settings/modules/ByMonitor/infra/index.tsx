@@ -11,6 +11,7 @@ import { WidgetSettingsModal } from "./WidgetSettingsModal.tsx";
 import { WallpaperSettingsModal } from "./WallpaperSettingsModal.tsx";
 import cs from "./index.module.css";
 import { monitors } from "../../../state/system.ts";
+import { WorkspaceSettings } from "./WorkspaceSettings.tsx";
 
 interface MonitorConfigProps {
   device: PhysicalMonitor;
@@ -85,6 +86,7 @@ export function SettingsByMonitor() {
 
   return (
     <>
+      <WorkspaceSettings />
       {devices.map((device) => {
         let monitor = settingsByMonitor[device.id];
         if (!monitor) {
