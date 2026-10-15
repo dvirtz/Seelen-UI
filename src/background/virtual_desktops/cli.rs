@@ -28,8 +28,9 @@ fn neighbor_workspace_id(
     monitor_id: &MonitorId,
     direction: Direction,
 ) -> Result<Option<WorkspaceId>> {
-    vd.monitors.with_lock(|monitors| {
-        let monitor = monitors.get(monitor_id).ok_or("Monitor not found")?;
+    {
+        let state = vd.state.lock();
+        let monitor = state.monitors.get(monitor_id).ok_or("Monitor not found")?;
         let (row, col) = monitor
             .workspaces
             .position(monitor.active_workspace_id())
@@ -42,13 +43,8 @@ fn neighbor_workspace_id(
             Direction::Down => (row + 1, col),
         };
 
-        Result::Ok(
-            monitor
-                .workspaces
-                .get(desired_row, desired_col)
-                .map(|w| w.id.clone()),
-        )
-    })
+        Result::Ok(monitor.workspaces.get(desired_row, desired_col).cloned())
+    }
 }
 
 /// Id of the workspace targeted by a `DirectionOrIndex`: either the neighbor in the
@@ -60,12 +56,11 @@ fn target_workspace_id(
 ) -> Result<Option<WorkspaceId>> {
     match target {
         DirectionOrIndex::Direction(direction) => neighbor_workspace_id(vd, monitor_id, direction),
-        DirectionOrIndex::Index(index) => vd
-            .monitors
-            .get(monitor_id, |monitor| {
-                monitor.active_row().get(index).map(|w| w.id.clone())
-            })
-            .ok_or_else(|| "Monitor not found".into()),
+        DirectionOrIndex::Index(index) => {
+            let state = vd.state.lock();
+            let monitor = state.monitors.get(monitor_id).ok_or("Monitor not found")?;
+            Ok(monitor.active_row().get(index).cloned())
+        }
     }
 }
 
@@ -108,8 +103,11 @@ fn process_vd_command(cmd: VdCommand) -> Result<()> {
         VdCommand::DestroyCurrentWorkspace => {
             let monitor_id = cursor_monitor_id()?;
             let workspace_id = vd
+                .state
+                .lock()
                 .monitors
-                .get(&monitor_id, |monitor| monitor.active_workspace_id().clone())
+                .get(&monitor_id)
+                .map(|monitor| monitor.active_workspace_id().clone())
                 .ok_or("Monitor not found")?;
             vd.destroy_desktop(&workspace_id)?;
         }

@@ -65,33 +65,30 @@ event_manager!(TwmState, TwmStateEvent);
 impl TwmState {
     fn initialize(&mut self) {
         let vd = VdManager::instance();
-        vd.monitors.for_each(|(_, monitor)| {
-            let active_workspace_id = monitor.active_workspace_id().clone();
-            for row in monitor.workspaces.rows() {
-                for workspace in row {
-                    // Windows on inactive workspaces are minimized by the virtual desktop
-                    // manager to hide them and must keep their slot; on the active workspace
-                    // a minimized window was minimized by the user and must not get one,
-                    // otherwise the layout shows an empty tile until the next re-render.
-                    let should_be_managed = if workspace.id == active_workspace_id {
-                        WindowManagerV2::should_be_managed
-                    } else {
-                        WindowManagerV2::should_be_managed_ignoring_minimized
-                    };
-                    let mut tree = Self::create_tree(&workspace.id);
-                    for &hwnd in &workspace.windows {
-                        let window = Window::from(hwnd);
-                        if should_be_managed(window.hwnd()) {
-                            let residual = tree.add_to_tiled(window.address());
-                            for w in residual {
-                                tree.add_to_floating(w);
-                            }
-                        }
+        let desktops: seelen_core::state::VirtualDesktops = vd.into();
+        let active = desktops.active_workspace_ids();
+        for workspace in desktops.workspaces.values() {
+            // Windows on inactive workspaces are minimized by the virtual desktop
+            // manager to hide them and must keep their slot; on the active workspace
+            // a minimized window was minimized by the user and must not get one,
+            // otherwise the layout shows an empty tile until the next re-render.
+            let should_be_managed = if active.contains(&workspace.id) {
+                WindowManagerV2::should_be_managed
+            } else {
+                WindowManagerV2::should_be_managed_ignoring_minimized
+            };
+            let mut tree = Self::create_tree(&workspace.id);
+            for &hwnd in &workspace.windows {
+                let window = Window::from(hwnd);
+                if should_be_managed(window.hwnd()) {
+                    let residual = tree.add_to_tiled(window.address());
+                    for w in residual {
+                        tree.add_to_floating(w);
                     }
-                    self.state.workspaces.insert(workspace.id.clone(), tree);
                 }
             }
-        });
+            self.state.workspaces.insert(workspace.id.clone(), tree);
+        }
 
         VdManager::subscribe(|event| {
             WindowManagerV2::process_vd_event(event).log_error();
@@ -567,10 +564,21 @@ impl TwmState {
         &self,
         rect: &Rect,
         workspace_id: &WorkspaceId,
+        monitor_id: Option<&seelen_core::system_state::MonitorId>,
     ) -> Option<isize> {
         let tree = self.state.workspaces.get(workspace_id)?;
-        let node_id = tree.get_nearest_leaf_to_rect(rect)?;
-        tree.face_of_node(node_id)
+        let target = rect.center();
+        tree.iter()
+            .filter(|node| matches!(node.kind, TwmNodeKind::Leaf | TwmNodeKind::Stack))
+            .filter_map(|node| {
+                let face = tree.face_of_node(node.id)?;
+                if monitor_id.is_some_and(|id| &Window::from(face).monitor_id() != id) {
+                    return None;
+                }
+                Some((face, target.distance_squared(&node.rect.as_ref()?.center())))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(face, _)| face)
     }
 
     pub fn get_nearest_tiled_window_at_side(
@@ -682,10 +690,7 @@ impl TwmState {
     }
 
     pub fn restore_stacks(&self) {
-        let mut active_ids = std::collections::HashSet::new();
-        VdManager::instance().monitors.for_each(|(_, monitor)| {
-            active_ids.insert(monitor.active_workspace_id().clone());
-        });
+        let active_ids = VdManager::instance().state.lock().active_workspace_ids();
 
         for (workspace_id, tree) in &self.state.workspaces {
             if !active_ids.contains(workspace_id) {

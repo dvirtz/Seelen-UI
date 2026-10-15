@@ -22,6 +22,9 @@
   const height = $derived((relativeRect.bottom - relativeRect.top) / monitor.scaleFactor);
 
   const vdMonitor = $derived(store.workspaces.monitors[monitor.id]);
+  const grid = $derived((vdMonitor?.workspaces ?? []).map((row) =>
+    row.map((id) => store.workspaces.workspaces[id]).filter((workspace) => workspace !== undefined)
+  ));
   const activeWorkspaceId = $derived(vdMonitor?.active_workspace);
 
   let viewingWorkspaceId: string | undefined = $state(undefined);
@@ -31,7 +34,7 @@
   });
 
   const viewingWorkspace = $derived(
-    vdMonitor?.workspaces.flat().find((w) => w.id === viewingWorkspaceId),
+    viewingWorkspaceId ? store.workspaces.workspaces[viewingWorkspaceId] : undefined,
   );
 
   const activeWallpaper = $derived(store.findWallpaper(viewingWorkspace?.wallpaper));
@@ -79,7 +82,7 @@
         style:--column-count={`${vdMonitor.workspaces[0]?.length || 1}`}
         style:--row-count={`${vdMonitor.workspaces.length}`}
       >
-        {#each vdMonitor.workspaces as row, rowIndex}
+        {#each grid as row, rowIndex}
           {#each row as workspace, columnIndex}
             <Workspace
               active={vdMonitor.active_workspace === workspace.id}

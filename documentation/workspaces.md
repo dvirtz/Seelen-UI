@@ -1,54 +1,82 @@
-# Workspaces across monitor setups
+# Shared workspaces across monitor setups
 
-Enable **Share workspaces between monitors** under **Settings > General** to choose
-a workspace grid when a monitor connects. The option is off by default.
+Under **Settings > General**, enable **Share workspaces between monitors** to choose an existing grid when connecting a
+monitor. The prompt lists disconnected monitors, workspace counts, and workspace names. Choose a grid to reuse, or
+**Keep separate workspaces**. Dismissing the prompt keeps the monitor's separate grid.
 
-If disconnected monitors have saved grids, a dialog lists their display names and
-workspace counts and a preview of workspace names. Choose a grid to reuse, or
-**Keep separate workspaces**. A new
-monitor starts with a new grid; a previously used monitor starts with its saved
-grid. Closing the dialog keeps that separate grid. If no disconnected grids are
-available, the monitor uses its own grid without a prompt.
+Reusing a grid links the monitors to the same workspace IDs. It does not swap their grids or copy workspace definitions.
+Each workspace has one name, icon, wallpaper, window list, and associated tiling tree. Adding or removing a row or
+column updates all monitors referencing that grid, including disconnected monitors. Renaming a workspace changes its
+single definition.
 
-For example, disconnect your home monitor and connect your work monitor. Select
-the home monitor's grid in the dialog. The work monitor receives the same workspace
-IDs, names, rows, columns, active workspace, and window assignments. Windows already
-on the work monitor's active workspace move into the reused grid's active workspace.
-Tiling layouts remain associated with their workspace IDs. Saved grids and display
-names persist across restarts. Restarting with the same monitors does not repeat
-the prompt.
+For example, link your work monitor to your home monitor's grid. Both monitor IDs continue referencing the same
+workspaces. Changes at work are already present when you return home, so an already linked monitor does not prompt
+again. Windows from all cells of a displaced separate grid are moved to the adopted active workspace; its old
+definitions remain in the registry without duplicated window membership.
 
-Monitors that remain connected keep their independent workspaces. Adding a second
-monitor while the first remains connected gives it a separate grid, with an option
-to reuse a saved grid from a disconnected monitor. Connected monitors' grids are
-never offered for reuse.
+When both linked monitors are connected, their shared grid has one active workspace and one set of windows spanning the
+displays. Each tiling overlay positions only windows physically on its own monitor. When a monitor is disconnected,
+restoring a workspace can move its windows to a connected monitor referencing that workspace.
 
-Enable **Switch workspaces on all monitors together**, also under **Settings >
-General**, to synchronize workspace switching. Selecting a workspace switches
-each connected monitor to the same row and column. Smaller grids grow to include
-the selected position. Each monitor keeps its own workspace IDs, names, windows,
-and tiling layouts; disconnected monitors are left alone. This setting is off by
-default and applies when you next select a workspace.
+The separate **Switch workspaces on all monitors together** option synchronizes _independent_ grids by row and column.
+Missing positions are created as needed. Both options can be enabled: shared grids keep their common active workspace,
+and independent grids switch to the corresponding position.
 
-The two options are independent and can both be enabled. For example, choose to
-reuse your home monitor's grid on your work monitor, and selecting its second
-workspace also selects the second workspace on your connected laptop display.
-With synchronization disabled, connected monitors switch independently.
+Monitor-specific settings remain associated with monitor IDs. A shared workspace has one wallpaper; its collection is
+resolved using the first connected owner in hardware ID order (or the first saved owner while disconnected).
 
-If the replacement already has a saved grid, that grid is retained under the
-disconnected monitor's ID. When returning home, select the work monitor's grid to
-keep changes made at work. Choosing a separate grid leaves the saved grids intact.
-Disabling sharing keeps current assignments and stops connection prompts.
+## Inspecting the saved configuration
 
-Each newly connected monitor gets its own choice; there is no automatic pairing.
-If a source reconnects or another dialog reuses its grid before you answer, the
-choice is revalidated and the available grids are refreshed. Unplugging the target
-monitor dismisses its pending dialog. Monitor-specific settings, including
-wallpaper collection overrides, remain tied to their original monitor IDs.
+The file is `%LOCALAPPDATA%\com.seelen.seelen-ui\workspaces3.json`. Monitor grids contain IDs; definitions are stored
+once in the top-level `workspaces` registry:
+
+```json
+{
+  "monitors": {
+    "home-monitor": {
+      "workspaces": [["coding", "email"]],
+      "active_workspace": "coding"
+    },
+    "work-monitor": {
+      "workspaces": [["coding", "email"]],
+      "active_workspace": "coding"
+    }
+  },
+  "workspaces": {
+    "coding": {
+      "id": "coding",
+      "name": "Coding",
+      "icon": null,
+      "wallpaper": null,
+      "windows": [42]
+    },
+    "email": {
+      "id": "email",
+      "name": "Email",
+      "icon": null,
+      "wallpaper": null,
+      "windows": []
+    }
+  },
+  "pinned": [],
+  "switching": false,
+  "connectedMonitors": ["work-monitor"],
+  "monitorNames": {
+    "home-monitor": "Home display",
+    "work-monitor": "Work display"
+  }
+}
+```
+
+If the new file does not exist, the old `workspaces2.json` is migrated on load. Workspace IDs, metadata, active
+selections, and windows are retained; duplicate window handles are removed. Missing definitions and empty or malformed
+grids are repaired. The next save writes `workspaces3.json`, leaving the old file intact for older builds. Inspect the
+file while Seelen is running, but exit Seelen before manually editing it because it saves changes automatically.
 
 ## Validation
 
-Automated regression tests live in `libs/core/src/state/workspaces/mod.rs`:
+Regression tests cover migration, shared references, window membership, changes to offline grids, shared activation,
+independent synchronization, and invalid grids:
 
 ```powershell
 cargo test -p seelen-core state::workspaces::tests
@@ -60,10 +88,6 @@ cd ../..
 npm run type-check
 ```
 
-On Windows, also verify docking with an active window and a minimized window on
-different workspaces, returning to the original monitor, restarting while
-undocked, and connecting two monitors. Verify synchronized switching with grids
-of different sizes and with both options enabled. Verify dismissing the prompt,
-unplugging while it is open, and choosing the same source from two prompts. Check
-the General settings and the dialog in light and dark
-mode with a different Windows accent color.
+On Windows, test home/work reconnections, connecting both linked monitors, moving windows between linked displays,
+switching independent grids with different sizes, and adding/removing rows while the other monitor is disconnected.
+Check the viewer, wallpapers, toolbar, and dialog in light/dark modes and a different accent color.

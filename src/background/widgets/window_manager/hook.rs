@@ -41,7 +41,7 @@ impl WindowManagerV2 {
                     return Ok(());
                 };
                 if let Some(face_id) =
-                    state.get_nearest_tiled_window_to_rect(&current_rect, &workspace_id)
+                    state.get_nearest_tiled_window_to_rect(&current_rect, &workspace_id, None)
                 {
                     let face = Window::from(face_id);
                     if &face != window && current_rect.intersection(&face.inner_rect()?).is_some() {
@@ -91,7 +91,8 @@ impl WindowManagerV2 {
         let Some((workspace_id, _)) = state.get_tree_for_window_mut(window) else {
             return Ok(());
         };
-        if let Some(face_id) = state.get_nearest_tiled_window_to_rect(&current_rect, &workspace_id)
+        if let Some(face_id) =
+            state.get_nearest_tiled_window_to_rect(&current_rect, &workspace_id, None)
         {
             let face = Window::from(face_id);
             if &face != window && current_rect.intersection(&face.inner_rect()?).is_some() {

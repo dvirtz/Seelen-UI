@@ -93,8 +93,7 @@ fn process_wm_command(cmd: WmCommand) -> Result<()> {
         WmCommand::ToggleMonocle => {
             let monitor_id = foreground.monitor_id();
             let workspace_id = VdManager::instance()
-                .monitors
-                .get(&monitor_id, |m| m.active_workspace_id().clone())
+                .active_workspace_for_monitor(&monitor_id)
                 .ok_or("Monitor not found")?;
             WM_STATE.lock().toggle_monocle(&workspace_id);
         }
@@ -152,20 +151,19 @@ fn process_focus_to_monitor(foreground: &Window, side: Direction) -> Result<()> 
         return Ok(());
     };
 
-    let Some(target_workspace_id) = VdManager::instance()
-        .monitors
-        .get(&target_monitor.stable_id()?, |m| {
-            m.active_workspace_id().clone()
-        })
+    let Some(target_workspace_id) =
+        VdManager::instance().active_workspace_for_monitor(&target_monitor.stable_id()?)
     else {
         return Ok(());
     };
 
     let fg_rect = foreground.inner_rect()?;
     let guard = WM_STATE.lock();
-    if let Some(target_window_id) =
-        guard.get_nearest_tiled_window_to_rect(&fg_rect, &target_workspace_id)
-    {
+    if let Some(target_window_id) = guard.get_nearest_tiled_window_to_rect(
+        &fg_rect,
+        &target_workspace_id,
+        Some(&target_monitor.stable_id()?),
+    ) {
         Window::from(target_window_id).focus()?;
     }
     Ok(())
@@ -180,9 +178,8 @@ fn process_move_to_monitor(foreground: &Window, side: Direction) -> Result<()> {
     };
     let target_monitor_id = target_monitor.stable_id()?;
 
-    if let Some(target_workspace_id) = VdManager::instance()
-        .monitors
-        .get(&target_monitor_id, |m| m.active_workspace_id().clone())
+    if let Some(target_workspace_id) =
+        VdManager::instance().active_workspace_for_monitor(&target_monitor_id)
     {
         // Reassign via the workspaces manager (emits a single WindowMoved event) instead of
         // mutating WM_STATE directly here. Otherwise, once the window physically lands on the

@@ -1,147 +1,420 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{error::Result, identifier_impl, resource::WallpaperId, system_state::MonitorId};
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), ts(export))]
 pub struct VirtualDesktops {
-    /// Workspaces per monitor
     pub monitors: HashMap<MonitorId, VirtualDesktopMonitor>,
-    /// pinned windows will be not affected by switching workspaces
+    /// Authoritative definitions and window membership, stored once per workspace ID.
+    pub workspaces: HashMap<WorkspaceId, DesktopWorkspace>,
     pub pinned: Vec<isize>,
-    /// true if the system is currently switching workspaces
     pub switching: bool,
-    /// Most recently connected displays, used to avoid duplicate connection prompts.
     pub connected_monitors: Vec<MonitorId>,
-    /// Friendly display names, including disconnected displays offered for reuse.
     pub monitor_names: HashMap<MonitorId, String>,
 }
 
 impl VirtualDesktops {
-    /// Switch by grid position across connected displays when synchronization is enabled.
-    /// Grow smaller grids so every display can reach the requested position; each
-    /// display retains its own workspace IDs and windows.
-    pub fn switch_to_workspace(
-        &mut self,
-        workspace_id: &WorkspaceId,
-        connected: &[MonitorId],
-        together: bool,
-    ) -> Result<Vec<(MonitorId, WorkspaceId)>> {
-        let (source, (row, column)) = self
-            .monitors
-            .iter()
-            .find_map(|(id, monitor)| {
-                monitor
-                    .workspaces
-                    .position(workspace_id)
-                    .map(|position| (id.clone(), position))
-            })
-            .ok_or("Workspace not found")?;
-        let mut targets = if together {
-            connected.to_vec()
-        } else {
-            Vec::new()
-        };
-        targets.retain(|id| id != &source && self.monitors.contains_key(id));
-        targets.sort_by(|a, b| a.0.cmp(&b.0));
-        targets.dedup();
-        // Restore the initiating display last so keyboard focus stays there.
-        targets.push(source);
-        let mut changed = Vec::new();
-        for id in targets {
-            let monitor = self.monitors.get_mut(&id).expect("target monitor exists");
-            while monitor.workspaces.row_count() <= row {
-                monitor.workspaces.add_row();
-            }
-            while monitor.workspaces.column_count() <= column {
-                monitor.workspaces.add_column();
-            }
-            let target = monitor.workspaces.get(row, column).unwrap().id.clone();
-            if monitor.active_workspace_id() != &target {
-                monitor.set_active_workspace(&target)?;
-                changed.push((id, target));
-            }
+    pub fn ensure_monitor(&mut self, id: MonitorId) {
+        if !self.monitors.contains_key(&id) {
+            let workspace = self.new_workspace();
+            self.monitors
+                .insert(id, VirtualDesktopMonitor::create(workspace));
         }
-        Ok(changed)
     }
 
-    /// Ensure each connected display has a grid. Never choose a source automatically.
-    /// Return newly connected displays for the infrastructure to prompt, if enabled.
+    fn new_workspace(&mut self) -> WorkspaceId {
+        let workspace = DesktopWorkspace::create();
+        let id = workspace.id.clone();
+        self.workspaces.insert(id.clone(), workspace);
+        id
+    }
+
     pub fn reconcile_monitors(&mut self, mut connected: Vec<MonitorId>) -> Vec<MonitorId> {
         connected.sort_by(|a, b| a.0.cmp(&b.0));
         connected.dedup();
         let added = connected
             .iter()
-            .cloned()
             .filter(|id| !self.connected_monitors.contains(id))
+            .cloned()
             .collect();
-        for target in &connected {
-            self.monitors
-                .entry(target.clone())
-                .or_insert_with(VirtualDesktopMonitor::create);
+        for id in &connected {
+            self.ensure_monitor(id.clone());
+        }
+        let mut priority = connected.clone();
+        priority.sort_by(|a, b| {
+            (!self.connected_monitors.contains(a), &a.0)
+                .cmp(&(!self.connected_monitors.contains(b), &b.0))
+        });
+        let mut aligned = Vec::new();
+        for id in priority {
+            let source = self.monitors[&id].clone();
+            if aligned.contains(&source.workspaces) {
+                continue;
+            }
+            for monitor in self.monitors.values_mut() {
+                if monitor.workspaces == source.workspaces {
+                    monitor.active_workspace = source.active_workspace.clone();
+                }
+            }
+            aligned.push(source.workspaces);
         }
         self.connected_monitors = connected;
         added
     }
 
+    pub fn monitors_for_workspace(&self, id: &WorkspaceId) -> Vec<MonitorId> {
+        let mut ids: Vec<_> = self
+            .monitors
+            .iter()
+            .filter(|(_, monitor)| monitor.workspaces.contains(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by(|a, b| {
+            (!self.connected_monitors.contains(a), &a.0)
+                .cmp(&(!self.connected_monitors.contains(b), &b.0))
+        });
+        ids
+    }
+
+    pub fn active_workspace_ids(&self) -> HashSet<WorkspaceId> {
+        self.connected_monitors
+            .iter()
+            .filter_map(|id| self.monitors.get(id))
+            .map(|monitor| monitor.active_workspace.clone())
+            .collect()
+    }
+
     pub fn reusable_monitor_grids(&self, connected: &[MonitorId]) -> Vec<MonitorId> {
-        let mut sources: Vec<_> = self
+        let mut ids: Vec<_> = self
             .monitors
             .keys()
             .filter(|id| !connected.contains(id))
             .cloned()
             .collect();
-        sources.sort_by(|a, b| a.0.cmp(&b.0));
-        sources
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids
     }
 
-    /// Explicitly selected reuse: swap grids without duplicating workspace IDs.
-    /// Keep currently visible windows on the target's adopted active workspace.
-    /// The target's previous grid remains saved under the disconnected source ID.
+    /// Link both monitors to the same IDs; the source's references are never swapped.
     pub fn reuse_monitor_grid(
         &mut self,
         target: &MonitorId,
         source: &MonitorId,
     ) -> Result<Vec<isize>> {
         if target == source
-            || !self.monitors.contains_key(target)
-            || !self.monitors.contains_key(source)
             || !self.connected_monitors.contains(target)
             || self.connected_monitors.contains(source)
         {
             return Err("Invalid workspace grid selection".into());
         }
-        let mut adopted = self.monitors.remove(source).unwrap();
-        let mut previous = self.monitors.remove(target).unwrap();
-        let windows = std::mem::take(&mut previous.active_workspace_mut().windows);
-        adopted
-            .active_workspace_mut()
-            .windows
-            .extend(windows.iter().copied());
-        self.monitors.insert(target.clone(), adopted);
-        self.monitors.insert(source.clone(), previous);
-        Ok(windows)
-    }
-
-    pub fn sanitize(&mut self) {
-        let mut seen = HashSet::new();
-        self.pinned.retain(|x| seen.insert(*x));
-
-        for monitor in self.monitors.values_mut() {
-            monitor.sanitize();
-            /* for workspace in &mut monitor.workspaces {
-                workspace.windows.retain(|x| seen.insert(*x));
-            } */
-            for row in &mut monitor.workspaces.0 {
-                for workspace in row {
-                    workspace.windows.retain(|x| seen.insert(*x));
+        let adopted = self
+            .monitors
+            .get(source)
+            .ok_or("Source monitor not found")?
+            .clone();
+        let previous = self
+            .monitors
+            .get(target)
+            .ok_or("Target monitor not found")?
+            .clone();
+        if !self.workspaces.contains_key(adopted.active_workspace_id()) {
+            return Err("Active workspace not found".into());
+        }
+        let mut moved = Vec::new();
+        // Preserve windows from every displaced cell, including hidden cells.
+        for id in previous.workspaces.rows().iter().flatten() {
+            if !adopted.workspaces.contains(id)
+                && self
+                    .monitors_for_workspace(id)
+                    .iter()
+                    .all(|owner| owner == target)
+            {
+                if let Some(workspace) = self.workspaces.get_mut(id) {
+                    moved.append(&mut workspace.windows);
                 }
             }
         }
+        self.workspaces
+            .get_mut(adopted.active_workspace_id())
+            .ok_or("Active workspace not found")?
+            .windows
+            .extend(moved.iter().copied());
+        self.monitors.insert(target.clone(), adopted);
+        Ok(moved)
+    }
+
+    /// Apply grid edits to every monitor referencing that grid, including offline monitors.
+    fn replace_grid(&mut self, old: &WorkspaceGrid, new: WorkspaceGrid) {
+        for monitor in self.monitors.values_mut() {
+            if &monitor.workspaces == old {
+                monitor.workspaces = new.clone();
+                if !new.contains(&monitor.active_workspace) {
+                    monitor.active_workspace = new.rows()[0][0].clone();
+                }
+            }
+        }
+    }
+
+    fn grow_grid(&mut self, monitor_id: &MonitorId, rows: usize, columns: usize) -> Result<()> {
+        let old = self
+            .monitors
+            .get(monitor_id)
+            .ok_or("Monitor not found")?
+            .workspaces
+            .clone();
+        let mut grid = old.clone();
+        while grid.row_count() < rows {
+            grid.0.push(
+                (0..grid.column_count())
+                    .map(|_| self.new_workspace())
+                    .collect(),
+            );
+        }
+        for row in &mut grid.0 {
+            while row.len() < columns {
+                row.push(self.new_workspace());
+            }
+        }
+        self.replace_grid(&old, grid);
+        Ok(())
+    }
+
+    pub fn create_workspace(
+        &mut self,
+        monitor_id: &MonitorId,
+        as_row: bool,
+    ) -> Result<WorkspaceId> {
+        let monitor = self.monitors.get(monitor_id).ok_or("Monitor not found")?;
+        let (row, column) = monitor
+            .workspaces
+            .position(monitor.active_workspace_id())
+            .ok_or("Active workspace not found")?;
+        let rows = monitor.workspaces.row_count();
+        let columns = monitor.workspaces.column_count();
+        self.grow_grid(
+            monitor_id,
+            rows + usize::from(as_row),
+            columns + usize::from(!as_row),
+        )?;
+        Ok(self.monitors[monitor_id]
+            .workspaces
+            .get(
+                if as_row { rows } else { row },
+                if as_row { column } else { columns },
+            )
+            .unwrap()
+            .clone())
+    }
+
+    pub fn switch_to_workspace(
+        &mut self,
+        workspace_id: &WorkspaceId,
+        connected: &[MonitorId],
+        together: bool,
+    ) -> Result<Vec<(MonitorId, WorkspaceId)>> {
+        let source = self
+            .monitors_for_workspace(workspace_id)
+            .into_iter()
+            .find(|id| connected.contains(id))
+            .ok_or("Workspace has no connected monitor")?;
+        let original = self.monitors[&source].workspaces.clone();
+        let (row, column) = original
+            .position(workspace_id)
+            .ok_or("Workspace not found")?;
+        let mut targets: Vec<_> = self
+            .monitors
+            .iter()
+            .filter(|(id, monitor)| {
+                monitor.workspaces == original || (together && connected.contains(id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        targets.sort_by(|a, b| a.0.cmp(&b.0));
+        targets.retain(|id| id != &source);
+        targets.push(source);
+        let mut changed = Vec::new();
+        for id in targets {
+            self.grow_grid(&id, row + 1, column + 1)?;
+            let target = self.monitors[&id]
+                .workspaces
+                .get(row, column)
+                .unwrap()
+                .clone();
+            let grid = self.monitors[&id].workspaces.clone();
+            for (peer_id, monitor) in &mut self.monitors {
+                if monitor.workspaces == grid && monitor.active_workspace != target {
+                    monitor.active_workspace = target.clone();
+                    if connected.contains(peer_id) {
+                        changed.push((peer_id.clone(), target.clone()));
+                    }
+                }
+            }
+        }
+        changed.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        Ok(changed)
+    }
+
+    pub fn remove_workspace(&mut self, id: &WorkspaceId) -> Result<Vec<WorkspaceId>> {
+        let source = self
+            .monitors_for_workspace(id)
+            .into_iter()
+            .next()
+            .ok_or("Workspace not found")?;
+        let old = self.monitors[&source].workspaces.clone();
+        let (row, column) = old.position(id).ok_or("Workspace not found")?;
+        if old.row_count() == 1 && old.column_count() == 1 {
+            return Err("Cannot remove the last workspace".into());
+        }
+        let remove_column = old.column_count() > 1;
+        let mut grid = old.clone();
+        let mut redirects = Vec::new();
+        if remove_column {
+            let side = if column == 0 { 1 } else { column - 1 };
+            for cells in &mut grid.0 {
+                redirects.push((cells[column].clone(), cells[side].clone()));
+                cells.remove(column);
+            }
+        } else {
+            let side = if row == 0 { 1 } else { row - 1 };
+            for column in 0..grid.column_count() {
+                redirects.push((grid.0[row][column].clone(), grid.0[side][column].clone()));
+            }
+            grid.0.remove(row);
+        }
+        for monitor in self.monitors.values_mut() {
+            if monitor.workspaces == old {
+                if let Some((_, destination)) = redirects
+                    .iter()
+                    .find(|(removed, _)| removed == &monitor.active_workspace)
+                {
+                    monitor.active_workspace = destination.clone();
+                }
+            }
+        }
+        self.replace_grid(&old, grid);
+        let mut removed_ids = Vec::new();
+        for (removed, destination) in redirects {
+            if !self.monitors_for_workspace(&removed).is_empty() {
+                continue;
+            }
+            if let Some(workspace) = self.workspaces.remove(&removed) {
+                self.workspaces
+                    .get_mut(&destination)
+                    .ok_or("Destination workspace not found")?
+                    .windows
+                    .extend(workspace.windows);
+                removed_ids.push(removed);
+            }
+        }
+        Ok(removed_ids)
+    }
+
+    pub fn sanitize(&mut self) {
+        let mut ids: Vec<_> = self.monitors.keys().cloned().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for id in ids {
+            let mut grid = self.monitors[&id].workspaces.clone();
+            grid.0.retain(|row| !row.is_empty());
+            if grid.0.is_empty() {
+                grid.0.push(vec![self.new_workspace()]);
+            }
+            let columns = grid.0.iter().map(Vec::len).max().unwrap_or(1);
+            let mut unique = HashSet::new();
+            for row in &mut grid.0 {
+                for workspace_id in row.iter_mut() {
+                    if !unique.insert(workspace_id.clone()) {
+                        *workspace_id = self.new_workspace();
+                        unique.insert(workspace_id.clone());
+                    }
+                    self.workspaces
+                        .entry(workspace_id.clone())
+                        .or_insert_with(|| {
+                            let mut workspace = DesktopWorkspace::create();
+                            workspace.id = workspace_id.clone();
+                            workspace
+                        });
+                }
+                while row.len() < columns {
+                    row.push(self.new_workspace());
+                }
+            }
+            let monitor = self.monitors.get_mut(&id).unwrap();
+            monitor.workspaces = grid;
+            if !monitor.workspaces.contains(&monitor.active_workspace) {
+                monitor.active_workspace = monitor.workspaces.rows()[0][0].clone();
+            }
+        }
+        for (id, workspace) in &mut self.workspaces {
+            workspace.id = id.clone();
+        }
+        let mut seen = HashSet::new();
+        self.pinned.retain(|window| seen.insert(*window));
+        let mut ids: Vec<_> = self.workspaces.keys().cloned().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for id in ids {
+            self.workspaces
+                .get_mut(&id)
+                .unwrap()
+                .windows
+                .retain(|window| seen.insert(*window));
+        }
+        self.connected_monitors.sort_by(|a, b| a.0.cmp(&b.0));
+        self.connected_monitors.dedup();
+    }
+}
+
+impl<'de> Deserialize<'de> for VirtualDesktops {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let stored = StoredVirtualDesktops::deserialize(deserializer)?;
+        let mut state = Self {
+            workspaces: stored.workspaces,
+            pinned: stored.pinned,
+            switching: stored.switching,
+            connected_monitors: stored.connected_monitors,
+            monitor_names: stored.monitor_names,
+            ..Default::default()
+        };
+        let mut monitors: Vec<_> = stored.monitors.into_iter().collect();
+        monitors.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        for (id, monitor) in monitors {
+            let mut rows = Vec::new();
+            for row in monitor.workspaces {
+                let mut ids = Vec::new();
+                for entry in row {
+                    let workspace_id = match entry {
+                        StoredWorkspace::Id(id) => id,
+                        StoredWorkspace::Definition(workspace) => {
+                            let id = workspace.id.clone();
+                            if let Some(existing) = state.workspaces.get_mut(&id) {
+                                existing.windows.extend(workspace.windows);
+                            } else {
+                                state.workspaces.insert(id.clone(), workspace);
+                            }
+                            id
+                        }
+                    };
+                    ids.push(workspace_id);
+                }
+                rows.push(ids);
+            }
+            state.monitors.insert(
+                id,
+                VirtualDesktopMonitor {
+                    workspaces: WorkspaceGrid(rows),
+                    active_workspace: monitor.active_workspace,
+                },
+            );
+        }
+        state.sanitize();
+        Ok(state)
     }
 }
 
@@ -153,299 +426,47 @@ pub struct VirtualDesktopMonitor {
 }
 
 impl VirtualDesktopMonitor {
-    pub fn create() -> Self {
-        let workspace = DesktopWorkspace::create();
-        let current_workspace = workspace.id.clone();
+    pub fn create(workspace: WorkspaceId) -> Self {
         Self {
-            workspaces: WorkspaceGrid(vec![vec![workspace]]),
-            active_workspace: current_workspace,
+            workspaces: WorkspaceGrid(vec![vec![workspace.clone()]]),
+            active_workspace: workspace,
         }
     }
-
-    pub fn sanitize(&mut self) {
-        self.workspaces.sanitize();
-
-        if !self.workspaces.contains(&self.active_workspace) {
-            self.active_workspace = self.workspaces.0[0][0].id.clone();
-        }
-    }
-
     pub fn active_workspace_id(&self) -> &WorkspaceId {
         &self.active_workspace
     }
-
-    pub fn active_row(&self) -> &Vec<DesktopWorkspace> {
-        for row in &self.workspaces.0 {
-            if row.iter().any(|x| x.id == self.active_workspace) {
-                return row;
-            }
-        }
-        panic!("Active workspace doesn't exist in the grid");
-    }
-
-    pub fn active_workspace(&self) -> &DesktopWorkspace {
-        self.workspaces
-            .get_by_id(&self.active_workspace)
-            .expect("current workspace not found")
-    }
-
-    pub fn active_workspace_mut(&mut self) -> &mut DesktopWorkspace {
-        self.workspaces
-            .get_by_id_mut(&self.active_workspace)
-            .expect("current workspace not found")
-    }
-
-    /// Set the current workspace, return error if the workspace doesn't exist
-    pub fn set_active_workspace(&mut self, workspace_id: &WorkspaceId) -> Result<()> {
-        if self.workspaces.contains(workspace_id) {
-            self.active_workspace = workspace_id.clone();
-            Ok(())
-        } else {
-            Err("Invalid workspace id".into())
-        }
-    }
-
-    /// Add a new workspace column and return the id of the new cell on the active row.
-    /// The active workspace is not changed, switching to it is up to the caller.
-    pub fn add_workspace_column(&mut self) -> WorkspaceId {
-        self.workspaces.add_column();
-        let row = self.active_row();
-        row.last().unwrap().id.clone()
-    }
-
-    /// Add a new workspace row and return the id of the new cell on the active column.
-    /// The active workspace is not changed, switching to it is up to the caller.
-    pub fn add_workspace_row(&mut self) -> WorkspaceId {
-        let (_, col_idx) = self
-            .workspaces
-            .position(&self.active_workspace)
-            .expect("Active workspace doesn't exist in the grid");
-        self.workspaces.add_row();
-        self.workspaces.0.last().unwrap()[col_idx].id.clone()
-    }
-
-    /// Remove a workspace by id
-    /// - If the grid has more than one column, removes the whole column across every row
-    ///   (minimum 1 column required), moving all windows from each removed cell to the side
-    ///   column in its own row
-    /// - Otherwise, if the grid has more than one row, removes the current row instead,
-    ///   moving all windows from the removed cell to the side row in the same column
-    /// - If the removed workspace was current, switches to the side one
-    /// - Fails if the grid is already 1x1
-    pub fn remove_workspace(&mut self, workspace_id: &WorkspaceId) -> Result<()> {
-        if self.workspaces.column_count() <= 1 {
-            return self.remove_workspace_row(workspace_id);
-        }
-
-        // Find the column to remove
-        let (_, col_idx) = self
-            .workspaces
-            .position(workspace_id)
-            .ok_or("Workspace not found")?;
-
-        let col_to_move = if col_idx == 0 { 1 } else { col_idx - 1 };
-
-        let mut new_active = None;
-        for row in &mut self.workspaces.0 {
-            let windows = row[col_idx].windows.clone();
-            row[col_to_move].windows.extend(windows);
-
-            if row[col_idx].id == self.active_workspace {
-                new_active = Some(row[col_to_move].id.clone());
-            }
-
-            row.remove(col_idx);
-        }
-
-        if let Some(active) = new_active {
-            self.active_workspace = active;
-        }
-
-        self.workspaces.sanitize();
-        Ok(())
-    }
-
-    /// Remove the row containing `workspace_id`, moving its windows to the side row in the
-    /// same column. Fails if it's the last remaining row.
-    fn remove_workspace_row(&mut self, workspace_id: &WorkspaceId) -> Result<()> {
-        if self.workspaces.row_count() <= 1 {
-            return Err("Cannot remove the last workspace".into());
-        }
-
-        let (row_idx, _) = self
-            .workspaces
-            .position(workspace_id)
-            .ok_or("Workspace not found")?;
-
-        let row_to_move = if row_idx == 0 { 1 } else { row_idx - 1 };
-
-        let mut new_active = None;
-        for col_idx in 0..self.workspaces.column_count() {
-            let windows = self.workspaces.0[row_idx][col_idx].windows.clone();
-            self.workspaces.0[row_to_move][col_idx]
-                .windows
-                .extend(windows);
-
-            if self.workspaces.0[row_idx][col_idx].id == self.active_workspace {
-                new_active = Some(self.workspaces.0[row_to_move][col_idx].id.clone());
-            }
-        }
-
-        self.workspaces.0.remove(row_idx);
-
-        if let Some(active) = new_active {
-            self.active_workspace = active;
-        }
-
-        self.workspaces.sanitize();
-        Ok(())
-    }
-
-    /// Rename a workspace by id
-    pub fn rename_workspace(
-        &mut self,
-        workspace_id: &WorkspaceId,
-        name: Option<String>,
-    ) -> Result<()> {
-        let workspace = self
-            .workspaces
-            .get_by_id_mut(workspace_id)
-            .ok_or("Workspace not found")?;
-        workspace.name = name;
-        Ok(())
-    }
-
-    pub fn set_wallpapers(&mut self, f: impl Fn(&DesktopWorkspace) -> Option<WallpaperId>) {
-        for row in &mut self.workspaces.0 {
-            for workspace in row {
-                workspace.wallpaper = f(workspace);
-            }
-        }
+    pub fn active_row(&self) -> &Vec<WorkspaceId> {
+        &self.workspaces.rows()[self.workspaces.position(&self.active_workspace).unwrap().0]
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
-pub struct WorkspaceGrid(Vec<Vec<DesktopWorkspace>>);
+pub struct WorkspaceGrid(Vec<Vec<WorkspaceId>>);
 
 impl WorkspaceGrid {
-    pub fn rows(&self) -> &Vec<Vec<DesktopWorkspace>> {
+    pub fn rows(&self) -> &Vec<Vec<WorkspaceId>> {
         &self.0
     }
-
-    pub fn rows_mut(&mut self) -> &mut Vec<Vec<DesktopWorkspace>> {
-        &mut self.0
-    }
-
     pub fn row_count(&self) -> usize {
         self.0.len()
     }
-
     pub fn column_count(&self) -> usize {
-        self.0[0].len()
+        self.0.first().map_or(0, Vec::len)
     }
-
-    /// Ensures the grid has at least one row/column (1x1 minimum) and that
-    /// every row has the same number of columns, padding short rows with new workspaces.
-    pub fn sanitize(&mut self) {
-        self.0.retain(|row| !row.is_empty());
-
-        if self.0.is_empty() {
-            self.0.push(vec![DesktopWorkspace::create()]);
-            return;
-        }
-
-        let max_columns = self.0.iter().map(|row| row.len()).max().unwrap_or(1).max(1);
-        for row in &mut self.0 {
-            while row.len() < max_columns {
-                row.push(DesktopWorkspace::create());
-            }
-        }
+    pub fn contains(&self, id: &WorkspaceId) -> bool {
+        self.position(id).is_some()
     }
-
-    /// Find the (row, column) position of a workspace by id
-    pub fn position(&self, workspace_id: &WorkspaceId) -> Option<(usize, usize)> {
-        for (row_idx, row) in self.0.iter().enumerate() {
-            for (col_idx, workspace) in row.iter().enumerate() {
-                if &workspace.id == workspace_id {
-                    return Some((row_idx, col_idx));
-                }
-            }
-        }
-        None
+    pub fn get(&self, row: usize, column: usize) -> Option<&WorkspaceId> {
+        self.0.get(row)?.get(column)
     }
-
-    pub fn add_row(&mut self) {
-        let mut row = Vec::new();
-        for _ in 0..self.column_count() {
-            row.push(DesktopWorkspace::create());
-        }
-        self.0.push(row);
-    }
-
-    pub fn add_column(&mut self) {
-        for row in &mut self.0 {
-            row.push(DesktopWorkspace::create());
-        }
-    }
-
-    pub fn contains(&self, workspace_id: &WorkspaceId) -> bool {
-        for row in &self.0 {
-            for workspace in row {
-                if &workspace.id == workspace_id {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn get(&self, row: usize, col: usize) -> Option<&DesktopWorkspace> {
-        self.0.get(row)?.get(col)
-    }
-
-    pub fn get_by_window_id(&self, window_id: isize) -> Option<&DesktopWorkspace> {
-        for row in &self.0 {
-            for workspace in row {
-                if workspace.windows.contains(&window_id) {
-                    return Some(workspace);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_by_window_id_mut(&mut self, window_id: isize) -> Option<&mut DesktopWorkspace> {
-        for row in &mut self.0 {
-            for workspace in row {
-                if workspace.windows.contains(&window_id) {
-                    return Some(workspace);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_by_id(&self, workspace_id: &WorkspaceId) -> Option<&DesktopWorkspace> {
-        for row in &self.0 {
-            for workspace in row {
-                if &workspace.id == workspace_id {
-                    return Some(workspace);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_by_id_mut(&mut self, workspace_id: &WorkspaceId) -> Option<&mut DesktopWorkspace> {
-        for row in &mut self.0 {
-            for workspace in row {
-                if &workspace.id == workspace_id {
-                    return Some(workspace);
-                }
-            }
-        }
-        None
+    pub fn position(&self, id: &WorkspaceId) -> Option<(usize, usize)> {
+        self.0.iter().enumerate().find_map(|(row, cells)| {
+            cells
+                .iter()
+                .position(|cell| cell == id)
+                .map(|column| (row, column))
+        })
     }
 }
 
@@ -454,13 +475,11 @@ impl WorkspaceGrid {
 pub struct DesktopWorkspace {
     pub id: WorkspaceId,
     pub name: Option<String>,
-    /// react-icon icon name
     pub icon: Option<String>,
     pub wallpaper: Option<WallpaperId>,
     #[serde(default)]
     pub windows: Vec<isize>,
 }
-
 impl DesktopWorkspace {
     pub fn create() -> Self {
         Self {
@@ -476,217 +495,167 @@ impl DesktopWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
 pub struct WorkspaceId(pub String);
-
 identifier_impl!(WorkspaceId, String);
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct StoredVirtualDesktops {
+    monitors: HashMap<MonitorId, StoredMonitor>,
+    workspaces: HashMap<WorkspaceId, DesktopWorkspace>,
+    pinned: Vec<isize>,
+    switching: bool,
+    connected_monitors: Vec<MonitorId>,
+    monitor_names: HashMap<MonitorId, String>,
+}
+#[derive(Deserialize)]
+struct StoredMonitor {
+    workspaces: Vec<Vec<StoredWorkspace>>,
+    active_workspace: WorkspaceId,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredWorkspace {
+    Id(WorkspaceId),
+    Definition(DesktopWorkspace),
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn id(name: &str) -> MonitorId {
-        MonitorId(name.to_owned())
+    fn monitor(id: &str) -> MonitorId {
+        MonitorId(id.into())
     }
-
-    fn home_state() -> VirtualDesktops {
-        let mut home = VirtualDesktopMonitor::create();
-        let email = home.add_workspace_column();
-        home.rename_workspace(&email, Some("Email".into())).unwrap();
-        home.set_active_workspace(&email).unwrap();
-        home.active_workspace_mut().windows.push(42);
-        VirtualDesktops {
-            monitors: HashMap::from([(id("home"), home)]),
-            connected_monitors: vec![id("home")],
-            ..Default::default()
-        }
+    fn shared() -> VirtualDesktops {
+        let mut state = VirtualDesktops::default();
+        state.reconcile_monitors(vec![monitor("home")]);
+        state.create_workspace(&monitor("home"), false).unwrap();
+        state.reconcile_monitors(vec![monitor("work")]);
+        state
+            .reuse_monitor_grid(&monitor("work"), &monitor("home"))
+            .unwrap();
+        state
+    }
+    #[test]
+    fn sharing_references_one_definition_and_one_window_set() {
+        let mut state = shared();
+        assert_eq!(
+            state.monitors[&monitor("home")].workspaces,
+            state.monitors[&monitor("work")].workspaces
+        );
+        let id = state.monitors[&monitor("home")]
+            .active_workspace_id()
+            .clone();
+        state.workspaces.get_mut(&id).unwrap().name = Some("Coding".into());
+        state.workspaces.get_mut(&id).unwrap().windows.push(42);
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(json["monitors"]["home"]["workspaces"][0][0].is_string());
+        assert_eq!(
+            json["workspaces"][&id.0]["windows"],
+            serde_json::json!([42])
+        );
+        let restored: VirtualDesktops = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.workspaces[&id].name.as_deref(), Some("Coding"));
+        assert_eq!(restored.workspaces[&id].windows, vec![42]);
+    }
+    #[test]
+    fn edits_propagate_to_offline_references() {
+        let mut state = shared();
+        let id = state.create_workspace(&monitor("work"), true).unwrap();
+        assert!(state.monitors[&monitor("home")].workspaces.contains(&id));
+        state.remove_workspace(&id).unwrap();
+        assert_eq!(
+            state.monitors[&monitor("home")].workspaces,
+            state.monitors[&monitor("work")].workspaces
+        );
+    }
+    #[test]
+    fn shared_grids_switch_together_without_synchronizing_other_grids() {
+        let mut state = shared();
+        state.reconcile_monitors(vec![monitor("home"), monitor("work"), monitor("other")]);
+        let other = state.monitors[&monitor("other")]
+            .active_workspace_id()
+            .clone();
+        let id = state.monitors[&monitor("work")]
+            .workspaces
+            .get(0, 1)
+            .unwrap()
+            .clone();
+        state
+            .switch_to_workspace(&id, &state.connected_monitors.clone(), false)
+            .unwrap();
+        assert_eq!(state.monitors[&monitor("home")].active_workspace_id(), &id);
+        assert_eq!(state.monitors[&monitor("work")].active_workspace_id(), &id);
+        assert_eq!(
+            state.monitors[&monitor("other")].active_workspace_id(),
+            &other
+        );
+        state
+            .switch_to_workspace(&id, &state.connected_monitors.clone(), true)
+            .unwrap();
+        let other = &state.monitors[&monitor("other")];
+        assert_eq!(
+            other.workspaces.position(other.active_workspace_id()),
+            Some((0, 1))
+        );
+    }
+    #[test]
+    fn linking_preserves_windows_in_displaced_hidden_cells() {
+        let mut state = shared();
+        state.reconcile_monitors(vec![monitor("new")]);
+        let hidden = state.create_workspace(&monitor("new"), false).unwrap();
+        state.workspaces.get_mut(&hidden).unwrap().windows.push(77);
+        let moved = state
+            .reuse_monitor_grid(&monitor("new"), &monitor("home"))
+            .unwrap();
+        assert_eq!(moved, vec![77]);
+        let id = state.monitors[&monitor("new")].active_workspace_id();
+        assert!(state.workspaces[id].windows.contains(&77));
+    }
+    #[test]
+    fn relinking_one_monitor_preserves_another_grids_shared_windows() {
+        let mut state = shared();
+        let old = state.monitors[&monitor("work")]
+            .active_workspace_id()
+            .clone();
+        state.workspaces.get_mut(&old).unwrap().windows.push(42);
+        state.ensure_monitor(monitor("other"));
+        let moved = state
+            .reuse_monitor_grid(&monitor("work"), &monitor("other"))
+            .unwrap();
+        assert!(moved.is_empty());
+        assert_eq!(state.workspaces[&old].windows, vec![42]);
+        assert!(state.monitors[&monitor("home")].workspaces.contains(&old));
+        assert!(!state.monitors[&monitor("work")].workspaces.contains(&old));
     }
 
     #[test]
-    fn connecting_monitor_never_automatically_reuses_a_grid() {
-        let mut state = home_state();
-        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
-        assert_eq!(state.reconcile_monitors(vec![id("work")]), vec![id("work")]);
-        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &home_id);
-        assert_ne!(state.monitors[&id("work")].active_workspace_id(), &home_id);
-        assert_eq!(state.reusable_monitor_grids(&[id("work")]), vec![id("home")]);
+    fn old_nested_files_are_migrated_without_changing_ids_or_windows() {
+        let id = WorkspaceId("existing".into());
+        let mut definition = DesktopWorkspace::create();
+        definition.id = id.clone();
+        definition.name = Some("Email".into());
+        definition.windows = vec![42, 42];
+        let json = serde_json::json!({
+            "monitors": { "home": { "workspaces": [[definition.clone()]], "active_workspace": id },
+                          "work": { "workspaces": [[definition]], "active_workspace": id } }
+        });
+        let state: VirtualDesktops = serde_json::from_value(json).unwrap();
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[&id].windows, vec![42]);
+        assert_eq!(state.workspaces[&id].name.as_deref(), Some("Email"));
     }
-
     #[test]
-    fn explicit_reuse_keeps_the_selected_grid_and_currently_visible_windows() {
-        let mut state = home_state();
-        state.monitors.get_mut(&id("home")).unwrap().add_workspace_row();
-        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
-        state.reconcile_monitors(vec![id("work")]);
-        let work = state.monitors.get_mut(&id("work")).unwrap();
-        let work_id = work.active_workspace_id().clone();
-        work.active_workspace_mut().windows.push(99);
-        assert_eq!(state.reuse_monitor_grid(&id("work"), &id("home")).unwrap(), vec![99]);
-        let adopted = &state.monitors[&id("work")];
-        assert_eq!(adopted.active_workspace_id(), &home_id);
-        assert_eq!(adopted.active_workspace().name.as_deref(), Some("Email"));
-        assert_eq!(adopted.workspaces.row_count(), 2);
-        assert_eq!(adopted.workspaces.column_count(), 2);
-        assert_eq!(adopted.active_workspace().windows, vec![42, 99]);
-        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &work_id);
-        assert!(state.monitors[&id("home")].active_workspace().windows.is_empty());
-        let mut ids = HashSet::new();
+    fn dangling_references_and_empty_grids_are_repaired() {
+        let json = serde_json::json!({ "monitors": {
+            "home": { "workspaces": [], "active_workspace": "missing" },
+            "work": { "workspaces": [["known", "known"]], "active_workspace": "missing" }
+        }});
+        let state: VirtualDesktops = serde_json::from_value(json).unwrap();
         for monitor in state.monitors.values() {
-            for workspace in monitor.workspaces.rows().iter().flatten() {
-                assert!(ids.insert(workspace.id.clone()));
+            assert!(monitor.workspaces.contains(monitor.active_workspace_id()));
+            for id in monitor.workspaces.rows().iter().flatten() {
+                assert!(state.workspaces.contains_key(id));
             }
         }
-    }
-
-    #[test]
-    fn keeping_separate_grids_preserves_existing_monitor_configuration() {
-        let mut state = home_state();
-        state.reconcile_monitors(vec![id("work")]);
-        let work = serde_json::to_value(&state.monitors[&id("work")]).unwrap();
-        state.reconcile_monitors(vec![id("home")]);
-        state.reconcile_monitors(vec![id("work")]);
-        assert_eq!(serde_json::to_value(&state.monitors[&id("work")]).unwrap(), work);
-    }
-
-    #[test]
-    fn returning_home_requires_an_explicit_choice_and_keeps_latest_edits() {
-        let mut state = home_state();
-        state.reconcile_monitors(vec![id("work")]);
-        state.reuse_monitor_grid(&id("work"), &id("home")).unwrap();
-        let added = state.monitors.get_mut(&id("work")).unwrap().add_workspace_column();
-        state.reconcile_monitors(vec![id("home")]);
-        assert!(!state.monitors[&id("home")].workspaces.contains(&added));
-        state.reuse_monitor_grid(&id("home"), &id("work")).unwrap();
-        assert!(state.monitors[&id("home")].workspaces.contains(&added));
-    }
-
-    #[test]
-    fn restarting_with_changed_monitors_offers_saved_disconnected_grids() {
-        let mut state = home_state();
-        state.monitor_names.insert(id("home"), "Home display".into());
-        state.reconcile_monitors(vec![]);
-        let mut restarted: VirtualDesktops =
-            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!(restarted.reconcile_monitors(vec![id("work")]), vec![id("work")]);
-        assert_eq!(restarted.reusable_monitor_grids(&[id("work")]), vec![id("home")]);
-        assert_eq!(restarted.monitor_names[&id("home")], "Home display");
-    }
-
-    #[test]
-    fn repeated_notifications_do_not_repeat_connection_prompts() {
-        let mut state = home_state();
-        assert_eq!(state.reconcile_monitors(vec![id("work")]), vec![id("work")]);
-        assert!(state.reconcile_monitors(vec![id("work")]).is_empty());
-        let json = serde_json::to_string(&state).unwrap();
-        let mut restarted: VirtualDesktops = serde_json::from_str(&json).unwrap();
-        assert!(restarted.reconcile_monitors(vec![id("work")]).is_empty());
-    }
-
-    #[test]
-    fn connected_monitors_are_not_offered_for_reuse() {
-        let mut state = home_state();
-        state.monitors.insert(id("old"), VirtualDesktopMonitor::create());
-        state.reconcile_monitors(vec![id("home"), id("work")]);
-        assert_eq!(state.reusable_monitor_grids(&[id("home"), id("work")]), vec![id("old")]);
-    }
-
-    #[test]
-    fn invalid_reuse_does_not_change_any_grid() {
-        let mut state = home_state();
-        let before = serde_json::to_value(&state).unwrap();
-        assert!(state.reuse_monitor_grid(&id("home"), &id("home")).is_err());
-        assert!(state.reuse_monitor_grid(&id("missing"), &id("home")).is_err());
-        assert_eq!(serde_json::to_value(&state).unwrap(), before);
-    }
-
-    #[test]
-    fn source_reconnecting_before_choice_cannot_have_its_grid_reused() {
-        let mut state = home_state();
-        state.reconcile_monitors(vec![id("work")]);
-        state.reconcile_monitors(vec![id("home"), id("work")]);
-        let before = serde_json::to_value(&state).unwrap();
-        assert!(state.reuse_monitor_grid(&id("work"), &id("home")).is_err());
-        assert_eq!(serde_json::to_value(&state).unwrap(), before);
-    }
-
-    #[test]
-    fn old_cache_files_keep_grids_until_the_user_chooses() {
-        let mut json = serde_json::to_value(home_state()).unwrap();
-        json.as_object_mut().unwrap().remove("connectedMonitors");
-        json.as_object_mut().unwrap().remove("monitorNames");
-        let mut state: VirtualDesktops = serde_json::from_value(json).unwrap();
-        let home_id = state.monitors[&id("home")].active_workspace_id().clone();
-        state.reconcile_monitors(vec![id("work")]);
-        assert_eq!(state.monitors[&id("home")].active_workspace_id(), &home_id);
-        assert_ne!(state.monitors[&id("work")].active_workspace_id(), &home_id);
-    }
-
-    #[test]
-    fn synchronized_switch_grows_connected_grids_and_preserves_disconnected_grids() {
-        let mut state = home_state();
-        let source = state.monitors.get_mut(&id("home")).unwrap();
-        let target = source.add_workspace_row();
-        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
-        state.monitors.insert(id("offline"), VirtualDesktopMonitor::create());
-        let offline = serde_json::to_value(&state.monitors[&id("offline")]).unwrap();
-        let changed = state
-            .switch_to_workspace(&target, &[id("home"), id("laptop")], true)
-            .unwrap();
-        assert_eq!(changed.last(), Some(&(id("home"), target)));
-        let laptop = &state.monitors[&id("laptop")];
-        assert_eq!(laptop.workspaces.position(laptop.active_workspace_id()), Some((1, 1)));
-        assert_eq!(laptop.workspaces.row_count(), 2);
-        assert_eq!(laptop.workspaces.column_count(), 2);
-        assert_eq!(serde_json::to_value(&state.monitors[&id("offline")]).unwrap(), offline);
-        // Each monitor has its own IDs and windows even when their positions match.
-        assert_ne!(laptop.active_workspace_id(), state.monitors[&id("home")].active_workspace_id());
-        assert!(laptop.active_workspace().windows.is_empty());
-    }
-
-    #[test]
-    fn independent_switch_does_not_change_other_monitors() {
-        let mut state = home_state();
-        let target = state.monitors[&id("home")].workspaces.get(0, 0).unwrap().id.clone();
-        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
-        let laptop = serde_json::to_value(&state.monitors[&id("laptop")]).unwrap();
-        let changed = state
-            .switch_to_workspace(&target, &[id("home"), id("laptop")], false)
-            .unwrap();
-        assert_eq!(changed, vec![(id("home"), target)]);
-        assert_eq!(serde_json::to_value(&state.monitors[&id("laptop")]).unwrap(), laptop);
-    }
-
-    #[test]
-    fn synchronized_switch_aligns_other_monitors_even_when_source_is_already_active() {
-        let mut state = home_state();
-        let target = state.monitors[&id("home")].active_workspace_id().clone();
-        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
-        let connected = [id("home"), id("laptop")];
-        let changed = state.switch_to_workspace(&target, &connected, true).unwrap();
-        assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].0, id("laptop"));
-        assert!(state.switch_to_workspace(&target, &connected, true).unwrap().is_empty());
-    }
-
-    #[test]
-    fn synchronized_switch_and_portability_can_be_combined() {
-        let mut state = home_state();
-        state.monitors.insert(id("laptop"), VirtualDesktopMonitor::create());
-        state.connected_monitors.push(id("laptop"));
-        let target = state.monitors[&id("home")].active_workspace_id().clone();
-        state.reconcile_monitors(vec![id("work"), id("laptop")]);
-        state.reuse_monitor_grid(&id("work"), &id("home")).unwrap();
-        state.switch_to_workspace(&target, &[id("work"), id("laptop")], true).unwrap();
-        for monitor_id in [id("work"), id("laptop")] {
-            let monitor = &state.monitors[&monitor_id];
-            assert_eq!(monitor.workspaces.position(monitor.active_workspace_id()), Some((0, 1)));
-        }
-        assert_eq!(state.monitors[&id("work")].active_workspace().windows, vec![42]);
-    }
-
-    #[test]
-    fn invalid_switch_leaves_every_monitor_unchanged() {
-        let mut state = home_state();
-        let snapshot = serde_json::to_value(&state).unwrap();
-        assert!(state.switch_to_workspace(&WorkspaceId("missing".into()), &[id("home")], true).is_err());
-        assert_eq!(serde_json::to_value(&state).unwrap(), snapshot);
     }
 }

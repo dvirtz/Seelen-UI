@@ -175,7 +175,23 @@ class _State {
   getLayout(monitorId: string): TwmRuntimeTree | null {
     const activeWsId = workspaces.value?.monitors?.[monitorId]?.active_workspace;
     if (!activeWsId) return null;
-    return layouts.value?.workspaces?.[activeWsId] ?? null;
+    const tree = layouts.value?.workspaces?.[activeWsId];
+    if (!tree) return null;
+    // Shared definitions own one window set; each overlay positions only windows
+    // physically on its monitor, preserving one copy of the shared tiling tree.
+    const windows = new Set(
+      interactables.value.filter((window) => window.monitor === monitorId).map((window) => window.hwnd),
+    );
+    return {
+      ...tree,
+      nodes: Object.fromEntries(
+        Object.entries(tree.nodes).map(([id, node]) => [id, {
+          ...node,
+          windows: node.windows.filter((window) => windows.has(window)),
+          activeWindow: node.activeWindow !== null && windows.has(node.activeWindow) ? node.activeWindow : null,
+        }]),
+      ),
+    };
   }
   get forceRepositioning() {
     return forceRepositioning;
