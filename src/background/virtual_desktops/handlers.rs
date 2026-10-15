@@ -3,7 +3,7 @@ use std::sync::Once;
 use seelen_core::{
     handlers::SeelenEvent,
     resource::{SluResource, WallpaperId},
-    state::{VirtualDesktops, Wallpaper},
+    state::{VirtualDesktops, VirtualDesktopsView, Wallpaper},
     system_state::MonitorId,
 };
 
@@ -22,12 +22,18 @@ fn get_vd_manager() -> &'static VdManager {
         VdManager::subscribe(|event| {
             // As switching is atomic operation the data was send via the event to avoid waiting for switch end.
             if let VirtualDesktopEvent::SwitchingDesktop(payload) = event {
-                emit_to_webviews(SeelenEvent::VirtualDesktopsChanged, payload);
+                emit_to_webviews(
+                    SeelenEvent::VirtualDesktopsChanged,
+                    VirtualDesktopsView::from(payload),
+                );
                 return;
             }
 
             let payload: VirtualDesktops = VdManager::instance().into();
-            emit_to_webviews(SeelenEvent::VirtualDesktopsChanged, payload);
+            emit_to_webviews(
+                SeelenEvent::VirtualDesktopsChanged,
+                VirtualDesktopsView::from(payload),
+            );
         });
     });
 
@@ -35,8 +41,8 @@ fn get_vd_manager() -> &'static VdManager {
 }
 
 impl crate::tauri_handlers::Handlers {
-    pub fn get_virtual_desktops() -> VirtualDesktops {
-        get_vd_manager().into()
+    pub fn get_virtual_desktops() -> VirtualDesktopsView {
+        VirtualDesktops::from(get_vd_manager()).into()
     }
 
     pub fn switch_workspace(workspace_id: seelen_core::state::WorkspaceId) -> Result<()> {

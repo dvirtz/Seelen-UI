@@ -40,7 +40,7 @@
   let activeWorkspaceData = $derived.by(() => {
     const monitor = vd;
     if (!monitor) return undefined;
-    return monitor.workspaces
+    return monitor.workspaceIds
       .flatMap((row, rowIdx) => row.flatMap((id, colIdx) => {
         const workspace = gState.workspaces.workspaces[id];
         return workspace ? [{ ...workspace, rowIdx, colIdx }] : [];

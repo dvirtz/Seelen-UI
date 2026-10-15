@@ -353,7 +353,7 @@ function workspacesStep(data: Data): boolean {
 
   const monitorId = Widget.getCurrent().decoded.monitorId!;
   const vd = _virtualDesktops.data?.monitors?.[monitorId];
-  data.workspaces = (vd?.workspaces || []).map((row) =>
+  data.workspaces = (vd?.workspaceIds || []).map((row) =>
     row.map((id) => _virtualDesktops.data!.workspaces[id]).filter((workspace) => workspace !== undefined)
   );
   data.activeWorkspace = vd?.active_workspace;

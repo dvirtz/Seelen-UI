@@ -125,7 +125,7 @@ macro_rules! slu_commands_declaration {
 
 slu_commands_declaration! {
     // virtual desktops
-    StateGetVirtualDesktops = get_virtual_desktops() -> VirtualDesktops,
+    StateGetVirtualDesktops = get_virtual_desktops() -> VirtualDesktopsView,
     SwitchWorkspace =
         @fallible()
         switch_workspace(workspace_id: WorkspaceId),
