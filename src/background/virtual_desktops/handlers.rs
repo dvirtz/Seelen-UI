@@ -45,6 +45,13 @@ impl crate::tauri_handlers::Handlers {
         VirtualDesktops::from(get_vd_manager()).into()
     }
 
+    pub fn set_monitor_workspace_grid(
+        monitor_id: MonitorId,
+        source_monitor_id: Option<MonitorId>,
+    ) -> Result<()> {
+        get_vd_manager().set_monitor_workspace_grid(&monitor_id, source_monitor_id.as_ref())
+    }
+
     pub fn switch_workspace(workspace_id: seelen_core::state::WorkspaceId) -> Result<()> {
         get_vd_manager().switch_to_id(&workspace_id)
     }
@@ -52,14 +59,24 @@ impl crate::tauri_handlers::Handlers {
     pub fn create_workspace(monitor_id: MonitorId) -> Result<seelen_core::state::WorkspaceId> {
         let vd = get_vd_manager();
         let workspace_id = vd.create_desktop(&monitor_id, false)?;
-        vd.switch_to_id(&workspace_id)?;
+        if crate::modules::monitors::MonitorManager::instance()
+            .get_cached_ids()
+            .contains(&monitor_id)
+        {
+            vd.switch_to_id(&workspace_id)?;
+        }
         Ok(workspace_id)
     }
 
     pub fn create_workspace_row(monitor_id: MonitorId) -> Result<seelen_core::state::WorkspaceId> {
         let vd = get_vd_manager();
         let workspace_id = vd.create_desktop(&monitor_id, true)?;
-        vd.switch_to_id(&workspace_id)?;
+        if crate::modules::monitors::MonitorManager::instance()
+            .get_cached_ids()
+            .contains(&monitor_id)
+        {
+            vd.switch_to_id(&workspace_id)?;
+        }
         Ok(workspace_id)
     }
 
