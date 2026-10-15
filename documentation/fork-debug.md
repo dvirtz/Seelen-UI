@@ -46,6 +46,43 @@ ignored `.vscode` directory. Its folder points to this checkout.
 9. Edit again, push again, and repeat. A local source edit does not change the downloaded Rust executable or its
    embedded frontend. The existing `npm run dev` command compiles Rust and is not part of this workflow.
 
+## Install the latest build with PowerShell
+
+From the checkout root, run:
+
+```powershell
+# Preview the selected build and installation destination without changing files.
+.\.github\fork-debug\install-latest.ps1 -WhatIf
+
+# Download, verify, install into target/fork-debug, and launch.
+.\.github\fork-debug\install-latest.ps1
+
+# Select a specific successful workflow run, or install without launching.
+.\.github\fork-debug\install-latest.ps1 -RunId 38632678315 -NoLaunch
+```
+
+The script supports Windows PowerShell 5.1 and PowerShell 7. It authenticates using `GH_TOKEN`, `GITHUB_TOKEN`, or Git's
+configured GitHub credential helper, in that order. Git must be installed when using the credential helper.
+`-Repository owner/repository` selects a different fork with the same workflow and artifact format.
+
+By default it selects the newest successful **Fork debug build** run with an unexpired debug artifact, across all
+branches. This is the latest completed build, which may differ from your current checkout. The workflow ref and the
+branch being compiled can differ; the script identifies the source SHA from the artifact name and verifies it against
+`COMMIT_SHA.txt` and `BUILD_INFO.json`. It prints the actual source branch after verification. It does not trigger a new
+build or change your checkout.
+
+If Seelen is running, the script asks you to exit through **Settings > Extras > Exit** before downloading. It never
+force-stops the app or service. It validates the ZIP digest when GitHub supplies one, checks extraction paths, and
+verifies every extracted file against `ARTIFACT_SHA256SUMS.txt`. Extraction and verification can take several minutes.
+These checks detect corruption; this remains an unsigned debug build from your selected fork.
+
+Before replacement, it copies the normal settings files and `workspaces2.json`/`workspaces3.json` into a uniquely named
+`target/fork-debug-backup-*` directory. An existing `target/fork-debug` installation is moved into that backup's
+`build/` subdirectory. Backups are retained; the script never restores settings automatically. The new build uses the
+normal Seelen settings directories and can request UAC for its helper service. Keep `target/fork-debug` in place while
+its service is registered, as described below. `-NoLaunch` still requires Seelen and its service to be closed for
+installation.
+
 ## Build choices and troubleshooting
 
 The workflow reuses `.github/actions/setup` (Node 24, Deno 2, the repository's pinned nightly Rust, npm/Cargo caches)
