@@ -1,6 +1,7 @@
 // This file was generated via rust macros. Don't modify manually.
 export enum SeelenCommand {
   StateGetVirtualDesktops = "get_virtual_desktops",
+  SetMonitorWorkspaceGrid = "set_monitor_workspace_grid",
   SwitchWorkspace = "switch_workspace",
   CreateWorkspace = "create_workspace",
   CreateWorkspaceRow = "create_workspace_row",

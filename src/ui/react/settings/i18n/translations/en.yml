@@ -141,10 +141,6 @@ extras:
     application will not receive updates and the WebView2 Runtime will not be
     automatically updated with Windows updates.
 general:
-  switch_workspaces_together: Switch workspaces on all monitors together
-  switch_workspaces_together_description: Selecting a workspace switches every connected monitor to the same row and column. Missing workspace positions are created automatically. Can be combined with sharing workspaces between monitor setups.
-  share_workspaces_between_monitors: Share workspaces between monitors
-  share_workspaces_between_monitors_description: When a monitor connects, choose whether to reuse a disconnected monitor's workspace grid or keep a separate grid. Monitors that stay connected keep their own workspaces.
   accent_color: Accent color
   date_format: Date format
   date_format_how_to: How to write a date format?
@@ -214,6 +210,36 @@ loading: Loading...
 miscellaneous: Miscellaneous
 monitors_configurations:
   label: Monitor {{index}}
+workspace_settings:
+  title: Workspaces
+  share: Share workspaces between monitors
+  share_description: When a monitor connects, offer grids from disconnected monitors. You can also assign grids manually below.
+  switch_together: Switch workspaces on all monitors together
+  switch_together_description: Selecting a workspace switches every connected monitor to the same row and column. Missing positions are created automatically. This also works with shared grids.
+  immediate: Save the options above with the settings Save button. Grid assignments and workspace edits below apply immediately. Select a workspace to edit it.
+  empty: No saved monitor grids yet.
+  connected: Connected
+  disconnected: Disconnected
+  independent: Independent grid
+  shared_with: 'Shared with: {{monitors}}'
+  choose_grid: Choose another monitor's grid
+  reuse: Use this grid
+  new_grid: Create separate grid
+  apply: Apply
+  reuse_confirm: Use {{monitor}}'s grid and share its workspace definitions and windows. Windows belonging only to this monitor's old grid move into the adopted active workspace. Future grid edits affect every monitor sharing it.
+  new_confirm: Create a separate grid with one workspace. Windows belonging only to this monitor move into it. Windows in a shared grid stay with that grid. Existing workspace definitions are retained.
+  grid: Workspace grid
+  position: Workspace {{row}}.{{column}}
+  active: Active
+  name: Workspace name
+  shared_edits: Changes affect every monitor sharing this grid, including disconnected monitors.
+  activate: Switch to workspace
+  add_column: Add column
+  add_row: Add row
+  remove_column: Remove column
+  remove_row: Remove row
+  remove_confirm: Remove this column, or this row when only one column remains, from every monitor sharing the grid. Windows move to neighboring workspaces. The last workspace cannot be removed.
+  action_failed: Could not update the workspace configuration. Refresh the settings and try again.
 more: More
 'no': 'No'
 open: Open

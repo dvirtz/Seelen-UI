@@ -12,16 +12,12 @@ import {
   getPollingInterval,
   getStartOfWeek,
   getSuspendOnGameMode,
-  getShareWorkspacesBetweenMonitors,
-  getSwitchWorkspacesTogether,
   setDateFormat,
   setHardwareAcceleration,
   setLanguage,
   setPollingInterval,
   setStartOfWeek,
   setSuspendOnGameMode,
-  setShareWorkspacesBetweenMonitors,
-  setSwitchWorkspacesTogether,
 } from "../application.ts";
 
 import { SettingsGroup, SettingsOption } from "../../../components/SettingsBox/index.tsx";
@@ -128,29 +124,6 @@ export function General() {
       </SettingsGroup>
 
       <Colors />
-
-      <SettingsGroup>
-        <SettingsOption
-          label={t("general.share_workspaces_between_monitors")}
-          description={t("general.share_workspaces_between_monitors_description")}
-          action={
-            <Switch
-              onChange={setShareWorkspacesBetweenMonitors}
-              checked={getShareWorkspacesBetweenMonitors()}
-            />
-          }
-        />
-        <SettingsOption
-          label={t("general.switch_workspaces_together")}
-          description={t("general.switch_workspaces_together_description")}
-          action={
-            <Switch
-              onChange={setSwitchWorkspacesTogether}
-              checked={getSwitchWorkspacesTogether()}
-            />
-          }
-        />
-      </SettingsGroup>
 
       <SettingsGroup>
         <SettingsOption

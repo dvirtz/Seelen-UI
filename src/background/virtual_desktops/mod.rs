@@ -181,18 +181,42 @@ impl VdManager {
         source: &MonitorId,
         expected: &WorkspaceId,
     ) -> Result<()> {
-        let (moved, workspace) = {
+        self.configure_monitor_grid(target, Some(source), Some(expected))
+    }
+
+    pub fn set_monitor_workspace_grid(
+        &self,
+        target: &MonitorId,
+        source: Option<&MonitorId>,
+    ) -> Result<()> {
+        self.configure_monitor_grid(target, source, None)?;
+        workspace_prompt::dismiss(target);
+        Ok(())
+    }
+
+    fn configure_monitor_grid(
+        &self,
+        target: &MonitorId,
+        source: Option<&MonitorId>,
+        expected: Option<&WorkspaceId>,
+    ) -> Result<()> {
+        let (moved, workspace, connected) = {
             let mut state = self.state.lock();
             state.connected_monitors = MonitorManager::instance().get_cached_ids();
-            if state
-                .monitors
-                .get(source)
-                .is_none_or(|monitor| monitor.active_workspace_id() != expected)
-            {
-                return Err("Workspace grid changed while choosing".into());
+            if let Some(expected) = expected {
+                if source
+                    .and_then(|source| state.monitors.get(source))
+                    .is_none_or(|monitor| monitor.active_workspace_id() != expected)
+                {
+                    return Err("Workspace grid changed while choosing".into());
+                }
             }
             let before = state.active_workspace_ids();
-            let moved = state.reuse_monitor_grid(target, source)?;
+            let moved = if expected.is_some() {
+                state.reuse_monitor_grid(target, source.ok_or("Source monitor not found")?)?
+            } else {
+                state.set_monitor_workspace_grid(target, source)?
+            };
             let workspace = state.monitors[target].active_workspace_id().clone();
             self.replace_indexes(&state);
             let after = state.active_workspace_ids();
@@ -203,7 +227,8 @@ impl VdManager {
             }
             self.restore_visible(&state);
             self.restore_workspace_in(&state, &workspace);
-            (moved, workspace)
+            let connected = state.connected_monitors.contains(target);
+            (moved, workspace, connected)
         };
         for window in moved {
             Self::send(VirtualDesktopEvent::WindowMoved {
@@ -216,7 +241,9 @@ impl VdManager {
             monitor: target.clone(),
             workspace: workspace.clone(),
         });
-        self.switch_to_id(&workspace)?;
+        if connected {
+            self.switch_to_id(&workspace)?;
+        }
         Ok(())
     }
 

@@ -1,0 +1,46 @@
+.section,
+.monitor,
+.grid,
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-s);
+  min-width: 0;
+}
+
+.heading,
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.heading {
+  justify-content: space-between;
+}
+
+.identity {
+  overflow-wrap: anywhere;
+}
+
+.choice {
+  flex: 1;
+  min-width: 180px;
+}
+
+.cell {
+  min-width: 0;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.grid {
+  overflow-x: auto;
+}
+
+.row {
+  display: grid;
+  gap: var(--spacing-xs);
+}
