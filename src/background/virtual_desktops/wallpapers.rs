@@ -200,10 +200,20 @@ impl WorkspaceWallpapersManager {
 
     /// Update wallpaper IDs in all workspaces (internal method with manager reference)
     pub(super) fn update_workspace_wallpapers_internal(vd_manager: &super::VdManager) {
-        vd_manager.monitors.for_each(|(monitor_id, monitor)| {
-            monitor
-                .set_wallpapers(|workspace| Self::get_current_wallpaper(monitor_id, &workspace.id));
-        });
+        let mut state = vd_manager.state.lock();
+        let assignments: Vec<_> = state
+            .workspaces
+            .keys()
+            .filter_map(|id| {
+                let owner = state.monitors_for_workspace(id).into_iter().next()?;
+                Some((id.clone(), Self::get_current_wallpaper(&owner, id)))
+            })
+            .collect();
+        for (id, wallpaper) in assignments {
+            if let Some(workspace) = state.workspaces.get_mut(&id) {
+                workspace.wallpaper = wallpaper;
+            }
+        }
     }
 
     /// Get the interval duration from settings (in seconds)

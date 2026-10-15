@@ -28,7 +28,10 @@ export function WallpaperSettingsModal({ monitorId, title }: Props) {
 
   // Get workspaces for this monitor from virtual desktops signal
   const monitorWorkspaces = useComputed(() => {
-    return $virtual_desktops.value?.monitors[monitorId]?.workspaces || [];
+    const state = $virtual_desktops.value;
+    return (state.monitors[monitorId]?.workspaces || []).map((row) =>
+      row.map((id) => state.workspaces[id]).filter((workspace) => workspace !== undefined)
+    );
   });
 
   return (

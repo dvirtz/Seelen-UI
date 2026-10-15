@@ -5,7 +5,7 @@ use url::Url;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), derive(ts_rs::TS))]
 #[serde(default, rename_all = "camelCase")]
-#[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), ts(export))]
+#[cfg_attr(all(feature = "gen-binds", not(feature = "salvo")), ts(export, optional_fields = nullable))]
 pub struct Dialog {
     pub identifier: uuid::Uuid,
     pub width: f64,
