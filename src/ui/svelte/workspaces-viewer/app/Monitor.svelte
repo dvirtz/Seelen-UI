@@ -22,7 +22,7 @@
   const height = $derived((relativeRect.bottom - relativeRect.top) / monitor.scaleFactor);
 
   const vdMonitor = $derived(store.workspaces.monitors[monitor.id]);
-  const grid = $derived((vdMonitor?.workspaces ?? []).map((row) =>
+  const grid = $derived((vdMonitor?.workspaceIds ?? []).map((row) =>
     row.map((id) => store.workspaces.workspaces[id]).filter((workspace) => workspace !== undefined)
   ));
   const activeWorkspaceId = $derived(vdMonitor?.active_workspace);
