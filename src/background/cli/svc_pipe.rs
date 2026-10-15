@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use slu_ipc::{IPC, ServiceIpc, messages::SvcAction};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -82,42 +82,40 @@ impl ServicePipe {
     // the service should be running since installer will start it or startup task scheduler
     // so if the service is not running, we need to start it (common on msix setup)
     pub async fn start_service() -> Result<()> {
-        let Err(err) = Self::try_start_from_task_scheduler() else {
-            return Ok(());
-        };
+        if let Err(err) = Self::try_start_from_task_scheduler() {
+            log::debug!("Can not start service via task scheduler: {err}");
+            let service_path = Self::service_path()?;
+            let result =
+                WindowsApi::execute(service_path.to_string_lossy().to_string(), None, None, true);
 
-        log::debug!("Can not start service via task scheduler: {err}");
+            if let Err(err) = result {
+                log::error!("First attempt to start service failed: {err}");
+                let try_again = get_app_handle()
+                    .dialog()
+                    .message(t!("service.not_running_description"))
+                    .title(t!("service.not_running"))
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::OkCustom(
+                        t!("service.not_running_ok").to_string(),
+                    ))
+                    .blocking_show();
 
-        let service_path = Self::service_path()?;
-        let result =
-            WindowsApi::execute(service_path.to_string_lossy().to_string(), None, None, true);
-
-        if let Err(err) = result {
-            log::error!("First attempt to start service failed: {err}");
-            let try_again = get_app_handle()
-                .dialog()
-                .message(t!("service.not_running_description"))
-                .title(t!("service.not_running"))
-                .kind(MessageDialogKind::Info)
-                .buttons(MessageDialogButtons::OkCustom(
-                    t!("service.not_running_ok").to_string(),
-                ))
-                .blocking_show();
-
-            if try_again {
+                if !try_again {
+                    return Err(err);
+                }
                 WindowsApi::execute(service_path.to_string_lossy().to_string(), None, None, true)?;
             }
-            return Err(err);
         }
 
-        let mut counter = 0;
-        while !Self::is_running() && counter < 10 {
-            log::debug!("Waiting for service IPC...");
-            counter += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        if counter == 10 {
+        // Task.Run only queues a launch. Both launch paths must wait for IPC before
+        // app initialization sends its one-time shortcut registration.
+        if !wait_for_service_ready(
+            Self::is_running,
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+        )
+        .await
+        {
             get_app_handle()
                 .dialog()
                 .message(t!("service.not_running_description"))
@@ -129,5 +127,57 @@ impl ServicePipe {
         }
 
         Ok(())
+    }
+}
+
+async fn wait_for_service_ready(
+    mut is_running: impl FnMut() -> bool,
+    timeout: Duration,
+    interval: Duration,
+) -> bool {
+    tokio::time::timeout(timeout, async {
+        while !is_running() {
+            log::debug!("Waiting for service IPC...");
+            tokio::time::sleep(interval).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn service_readiness_waits_for_delayed_startup() {
+        let mut probes = 0;
+        assert!(
+            wait_for_service_ready(
+                || {
+                    probes += 1;
+                    probes >= 3
+                },
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            )
+            .await
+        );
+        assert_eq!(probes, 3);
+    }
+
+    #[tokio::test]
+    async fn service_readiness_accepts_an_already_running_service() {
+        assert!(
+            wait_for_service_ready(|| true, Duration::from_secs(1), Duration::from_secs(1)).await
+        );
+    }
+
+    #[tokio::test]
+    async fn service_readiness_times_out_when_ipc_never_appears() {
+        assert!(
+            !wait_for_service_ready(|| false, Duration::from_millis(5), Duration::from_millis(1))
+                .await
+        );
     }
 }

@@ -72,6 +72,11 @@ jobs:
           npm run build:ui
           if ($LASTEXITCODE) { throw 'Frontend build failed' }
 
+      - name: Validate delayed service startup
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc -p seelen-ui --bin seelen-ui cli::svc_pipe::tests
+          if ($LASTEXITCODE) { throw 'Service readiness regression tests failed' }
+
       - name: Build hook DLL
         run: |
           cargo build --locked --target x86_64-pc-windows-msvc -p sluhk
