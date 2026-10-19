@@ -19,10 +19,10 @@ ignored `.vscode` directory. Its folder points to this checkout.
 ## Edit, push, build, download, debug
 
 1. Edit your Seelen checkout and commit/push your development branch to `origin` (`dvirtz/Seelen-UI`).
-2. On the fork, open **Actions → Fork debug build → Run workflow**. Select the workflow ref `master`, then enter the
-   branch to compile in the **branch** input. The workflow checks out that branch and records its resolved SHA. Fork
-   tooling is checked out separately from the workflow ref, so the source branch need not contain these files. With
-   GitHub CLI: `gh workflow run fork-debug.yml --repo dvirtz/Seelen-UI --ref master -f branch=feature/my-change`.
+2. On the fork, open **Actions → Fork debug build → Run workflow**. Select your development branch in **Use workflow
+   from**, then run the workflow. That branch must contain the workflow and fork tooling. The build uses the selected
+   commit for both source and tooling and records its SHA. With GitHub CLI:
+   `gh workflow run fork-debug.yml --repo dvirtz/Seelen-UI --ref feature/my-change`.
 3. Wait for a successful run. Download `seelen-debug-x64-<full-SHA>` from that run's artifacts. Extract its contents
    directly into `target/fork-debug/`: `seelen-ui.exe` must be at `target/fork-debug/seelen-ui.exe`. Use an empty
    destination for each download so artifacts from different commits cannot mix.
@@ -66,10 +66,9 @@ configured GitHub credential helper, in that order. Git must be installed when u
 `-Repository owner/repository` selects a different fork with the same workflow and artifact format.
 
 By default it selects the newest successful **Fork debug build** run with an unexpired debug artifact, across all
-branches. This is the latest completed build, which may differ from your current checkout. The workflow ref and the
-branch being compiled can differ; the script identifies the source SHA from the artifact name and verifies it against
-`COMMIT_SHA.txt` and `BUILD_INFO.json`. It prints the actual source branch after verification. It does not trigger a new
-build or change your checkout.
+branches. This is the latest completed build, which may differ from your current checkout. The script identifies the
+source SHA from the artifact name and verifies it against `COMMIT_SHA.txt` and `BUILD_INFO.json`. It prints the actual
+source branch after verification. It does not trigger a new build or change your checkout.
 
 If Seelen is running, the script asks you to exit through **Settings > Extras > Exit** before downloading. It never
 force-stops the app or service. It validates the ZIP digest when GitHub supplies one, checks extraction paths, and
