@@ -2,12 +2,6 @@ name: Fork debug build
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: Branch in dvirtz/Seelen-UI to build
-        required: true
-        default: master
-        type: string
 
 permissions:
   contents: read
@@ -32,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Record source commit
@@ -42,7 +36,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'Cannot resolve source commit' }
           "sha=$sha" >> $env:GITHUB_OUTPUT
 
-      # Tools come from the workflow ref, so contribution branches need no fork files.
+      # Pin packaging tools to the same selected workflow commit as the source.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -85,7 +79,7 @@ jobs:
       - name: Stage and verify artifact contents
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          SOURCE_BRANCH: ${{ inputs.branch }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
           TOOLS_SHA: ${{ github.sha }}
         run: ./.fork-tools/.github/fork-debug/package.ps1
 
