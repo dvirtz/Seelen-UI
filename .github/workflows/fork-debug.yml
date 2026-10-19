@@ -72,6 +72,13 @@ jobs:
           npm run build:ui
           if ($LASTEXITCODE) { throw 'Frontend build failed' }
 
+      - name: Test monitor reconnection and shared workspaces
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc -p seelen-ui --bin seelen-ui modules::monitors::application::tests
+          if ($LASTEXITCODE) { throw 'Monitor reconnection regression tests failed' }
+          cargo test --locked --target x86_64-pc-windows-msvc -p seelen-core state::workspaces::tests
+          if ($LASTEXITCODE) { throw 'Workspace regression tests failed' }
+
       - name: Build hook DLL
         run: |
           cargo build --locked --target x86_64-pc-windows-msvc -p sluhk

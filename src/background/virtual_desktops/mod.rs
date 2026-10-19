@@ -101,7 +101,9 @@ impl VdManager {
             }
         }
         MonitorManager::subscribe(|event| match event {
-            MonitorManagerEvent::ViewAdded(_) | MonitorManagerEvent::ViewRemoved(_) => {
+            MonitorManagerEvent::ViewAdded(_)
+            | MonitorManagerEvent::ViewRemoved(_)
+            | MonitorManagerEvent::ViewsChanged => {
                 let manager = Self::instance();
                 let added = manager.reconcile_monitors();
                 workspace_prompt::retain_connected();
@@ -110,7 +112,6 @@ impl VdManager {
                 Self::send(VirtualDesktopEvent::StateChanged);
                 manager.prompt_for_monitors(added);
             }
-            _ => {}
         });
         UserAppsManager::subscribe(|event| match event {
             UserAppWinEvent::Added(addr) => {
