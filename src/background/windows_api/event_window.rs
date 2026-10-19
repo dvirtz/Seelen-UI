@@ -158,11 +158,11 @@ impl BgWindowProc {
         if !previous && is_interactive {
             // reload all pods webviews on session resume
             std::thread::spawn(move || {
-                WIDGET_MANAGER.deployments.for_each(|(_, deployment)| {
+                for deployment in WIDGET_MANAGER.deployments() {
                     deployment.pods.for_each(|(_, pod)| {
                         pod.soft_restart();
                     });
-                });
+                }
             });
         }
     }

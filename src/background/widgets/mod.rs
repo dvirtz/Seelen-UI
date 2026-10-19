@@ -77,11 +77,11 @@ fn trigger_widget_inner(
                 return Err("Instance id is required for multiple instance widgets".into());
             };
 
-            WIDGET_MANAGER.deployments.get(&payload.id, |container| {
+            if let Some(container) = WIDGET_MANAGER.deployment(&payload.id) {
                 if !container.pods.contains_key(&label) {
                     container.create_runtime_instance(instance_id, owner_hwnd);
                 }
-            });
+            }
         }
     }
 
@@ -105,9 +105,9 @@ fn trigger_widget_inner(
         log::trace!("Trigger postponed, because widget instance is not ready: {label}");
         PENDING_TRIGGERS.upsert(label.clone(), payload);
 
-        WIDGET_MANAGER.deployments.get(&label.widget_id, |c| {
+        if let Some(c) = WIDGET_MANAGER.deployment(&label.widget_id) {
             c.start_webview(&label);
-        });
+        }
         return Ok(());
     }
 
@@ -156,7 +156,7 @@ fn widget_data_dir(webview: &tauri::WebviewWindow) -> Result<PathBuf> {
 pub fn notify_widget_statuses_change() {
     std::thread::spawn(|| {
         let mut result = Vec::new();
-        WIDGET_MANAGER.deployments.for_each(|(_, deployment)| {
+        for deployment in WIDGET_MANAGER.deployments() {
             deployment.pods.for_each(|(_, pod)| {
                 result.push(WidgetDebugInfo {
                     label: pod.label.raw.clone(),
@@ -167,7 +167,7 @@ pub fn notify_widget_statuses_change() {
                     webview_window_id: pod.hwnd(),
                 });
             });
-        });
+        }
         emit_to_webviews(SeelenEvent::WidgetDebugInfoChanged, result);
     });
 }
@@ -330,7 +330,7 @@ impl crate::tauri_handlers::Handlers {
 
     pub fn debug_get_widgets_statuses() -> Vec<WidgetDebugInfo> {
         let mut result = Vec::new();
-        WIDGET_MANAGER.deployments.for_each(|(_, deployment)| {
+        for deployment in WIDGET_MANAGER.deployments() {
             deployment.pods.for_each(|(_, pod)| {
                 result.push(WidgetDebugInfo {
                     label: pod.label.raw.clone(),
@@ -341,7 +341,7 @@ impl crate::tauri_handlers::Handlers {
                     webview_window_id: pod.hwnd(),
                 });
             });
-        });
+        }
         result
     }
 
