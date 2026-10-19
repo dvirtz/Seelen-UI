@@ -113,15 +113,13 @@ impl WindowManagerV2 {
         }
 
         let mut overlays = Vec::new();
-        WIDGET_MANAGER
-            .deployments
-            .get(&WidgetId::known_wm(), |deploy| {
-                deploy.pods.for_each(|(_, pod)| {
-                    if let Some(hwnd) = pod.hwnd() {
-                        overlays.push(hwnd);
-                    }
-                });
+        if let Some(deploy) = WIDGET_MANAGER.deployment(&WidgetId::known_wm()) {
+            deploy.pods.for_each(|(_, pod)| {
+                if let Some(hwnd) = pod.hwnd() {
+                    overlays.push(hwnd);
+                }
             });
+        }
 
         for hwnd in overlays {
             WindowsApi::set_z_order(HWND(hwnd as _), HWND_TOP).log_error();
