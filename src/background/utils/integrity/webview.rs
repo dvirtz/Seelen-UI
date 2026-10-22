@@ -6,6 +6,9 @@ use crate::{app::get_app_handle, error::Result};
 
 use super::IntegrityError;
 
+// A cold WebView2 startup can exceed three seconds, especially in debug builds.
+const WEBVIEW_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub fn validate_webview_runtime() -> std::result::Result<(), IntegrityError> {
     match webview_version() {
         Ok(version) => {
@@ -69,29 +72,97 @@ pub async fn check_for_webview_optimal_state() -> bool {
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    std::thread::spawn(|| {
-        let label = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("@seelen/integrity");
-        let window = tauri::WebviewWindowBuilder::new(
-            get_app_handle(),
-            &label,
-            tauri::WebviewUrl::App("vanilla/integrity/index.html".into()),
-        )
-        .visible(false)
-        .build()?;
-        window.hwnd()?; // build could not fail so we check for the handle.
-        window.destroy()?; // close the fake window
-        let _ = tx.send(());
-        Result::Ok(())
+    std::thread::spawn(move || {
+        let _ = tx.send(create_integrity_webview());
     });
 
-    tokio::select! {
-        _ = rx => {
+    wait_for_webview_check(rx, WEBVIEW_CHECK_TIMEOUT).await
+}
+
+fn create_integrity_webview() -> Result<()> {
+    let label = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("@seelen/integrity");
+    let window = tauri::WebviewWindowBuilder::new(
+        get_app_handle(),
+        &label,
+        tauri::WebviewUrl::App("vanilla/integrity/index.html".into()),
+    )
+    .visible(false)
+    .build()?;
+    window.hwnd()?; // build could not fail so we check for the handle.
+    window.destroy()?; // close the fake window
+    Ok(())
+}
+
+async fn wait_for_webview_check(
+    rx: tokio::sync::oneshot::Receiver<Result<()>>,
+    timeout: std::time::Duration,
+) -> bool {
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(Ok(()))) => {
             log::info!("Webview optimal state confirmed.");
             true
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-            log::error!("Webview optimal state check timed out.");
+        Ok(Ok(Err(err))) => {
+            log::error!("Webview optimal state check failed: {err:?}");
             false
         }
+        Ok(Err(err)) => {
+            log::error!("Webview optimal state check worker stopped: {err}");
+            false
+        }
+        Err(_) => {
+            log::error!("Webview optimal state check timed out after {timeout:?}.");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_cold_start_longer_than_three_seconds() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+                    tx.send(Ok(())).unwrap();
+                });
+                assert!(wait_for_webview_check(rx, WEBVIEW_CHECK_TIMEOUT).await);
+            });
+    }
+
+    #[test]
+    fn rejects_creation_failure_and_worker_exit() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tx.send(Err("Webview creation failed".into())).unwrap();
+                assert!(!wait_for_webview_check(rx, WEBVIEW_CHECK_TIMEOUT).await);
+
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                drop(tx);
+                assert!(!wait_for_webview_check(rx, WEBVIEW_CHECK_TIMEOUT).await);
+            });
+    }
+
+    #[test]
+    fn rejects_unresponsive_worker() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (_tx, rx) = tokio::sync::oneshot::channel();
+                assert!(!wait_for_webview_check(rx, std::time::Duration::ZERO).await);
+            });
     }
 }
