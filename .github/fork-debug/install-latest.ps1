@@ -152,15 +152,6 @@ Write-Host "Source: $($selected.SourceSha)"
 Write-Host ('Download: {0:N0} MB' -f ($selected.Artifact.size_in_bytes / 1MB))
 if (!$PSCmdlet.ShouldProcess($destination, 'Download, verify and install debug build (back up settings and previous build)')) { return }
 
-$running = @(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue)
-if ($running.Count) {
-    Write-Host 'Quit Seelen through Settings > Extras > Exit. Allow its helper service to stop.'
-    Read-Host 'Press Enter after Seelen has closed' | Out-Null
-    if (@(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue).Count) {
-        throw 'Seelen or its service is still running. Close it normally, then rerun this script.'
-    }
-}
-
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 $unique = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 $stage = Join-Path $target "fork-debug-stage-$unique"
@@ -180,9 +171,14 @@ try {
     Expand-DebugArtifact $zip $stage
     $info = Test-DebugArtifact $stage $selected.SourceSha
     Write-Host "Verified source branch: $($info.branch)"
-    # Another instance may have started while downloading.
-    if (@(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue).Count) {
-        throw 'Seelen started during the download. Close it before installing.'
+    # Keep Seelen available during download, extraction and verification; close it before replacement.
+    $running = @(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue)
+    if ($running.Count) {
+        Write-Host 'Quit Seelen through Settings > Extras > Exit. Allow its helper service to stop.'
+        Read-Host 'Press Enter after Seelen has closed' | Out-Null
+        if (@(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue).Count) {
+            throw 'Seelen or its service is still running. Close it normally, then rerun this script.'
+        }
     }
     New-Item -ItemType Directory -Path $backup | Out-Null
     foreach ($location in @(
