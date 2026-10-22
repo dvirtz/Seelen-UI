@@ -70,7 +70,8 @@ branches. This is the latest completed build, which may differ from your current
 source SHA from the artifact name and verifies it against `COMMIT_SHA.txt` and `BUILD_INFO.json`. It prints the actual
 source branch after verification. It does not trigger a new build or change your checkout.
 
-If Seelen is running, the script asks you to exit through **Settings > Extras > Exit** before downloading. It never
+If Seelen is running, the script asks you to exit through **Settings > Extras > Exit** after extraction and verification,
+just before backing up settings and replacing the build. It never
 force-stops the app or service. It validates the ZIP digest when GitHub supplies one, checks extraction paths, and
 verifies every extracted file against `ARTIFACT_SHA256SUMS.txt`. Extraction and verification can take several minutes.
 These checks detect corruption; this remains an unsigned debug build from your selected fork.
