@@ -2,6 +2,7 @@ use seelen_core::system_state::AppBarEdge;
 use std::sync::LazyLock;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, RECT},
+    Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect},
     UI::Shell::{
         ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE,
         ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
@@ -85,6 +86,29 @@ impl AppBarData {
         }
 
         unsafe { SHAppBarMessage(ABM_SETPOS, &mut data) };
+        drop(guard);
+
+        // ABM_SETPOS always returns TRUE, even when the monitor's work area
+        // does not exclude the bar. Record the actual result for diagnosis.
+        let monitor = unsafe { MonitorFromRect(&self.0.rc, MONITOR_DEFAULTTONULL) };
+        if !monitor.0.is_null() {
+            if let Ok(info) = super::WindowsApi::monitor_info(monitor) {
+                let work = info.monitorInfo.rcWork;
+                if self.0.rc.left < work.right
+                    && self.0.rc.right > work.left
+                    && self.0.rc.top < work.bottom
+                    && self.0.rc.bottom > work.top
+                {
+                    log::warn!(
+                        "Appbar reservation overlaps work area: hwnd={addr:x}, edge={}, requested={:?}, approved={:?}, monitor={:?}, work={work:?}",
+                        self.0.uEdge,
+                        self.0.rc,
+                        data.rc,
+                        info.monitorInfo.rcMonitor,
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
