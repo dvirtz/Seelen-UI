@@ -30,6 +30,11 @@ use events::VirtualDesktopEvent;
 
 static WORKSPACES_MANAGER: LazyLock<VdManager> = LazyLock::new(VdManager::create);
 
+/// A location change alone does not imply a user move: Windows also relocates
+/// windows when a display is disconnected. Match interactive move start/end.
+static USER_WINDOW_MOVE_ORIGINS: LazyLock<SyncHashMap<isize, MonitorId>> =
+    LazyLock::new(SyncHashMap::new);
+
 /// Windows minimized by workspace switching, excluding user-minimized windows.
 pub static MINIMIZED_BY_WORKSPACES: LazyLock<scc::HashSet<isize>> =
     LazyLock::new(scc::HashSet::new);
@@ -659,13 +664,21 @@ impl VdManager {
                 result?;
             }
             WinEvent::ObjectDestroy => {
+                USER_WINDOW_MOVE_ORIGINS.remove(&addr);
                 RESTORED_EVENT_QUEUE.retain(|id| *id != addr);
                 MINIMIZED_BY_WORKSPACES.remove_sync(&addr);
             }
             WinEvent::SystemForeground | WinEvent::ObjectFocus => {
                 Self::instance().move_to_top(addr)
             }
-            WinEvent::SynDebouncedRectChange => {
+            WinEvent::SystemMoveSizeStart => {
+                USER_WINDOW_MOVE_ORIGINS.remove(&addr);
+                if let Ok(monitor) = window.monitor().stable_id() {
+                    USER_WINDOW_MOVE_ORIGINS.upsert(addr, monitor);
+                }
+            }
+            WinEvent::SystemMoveSizeEnd => {
+                let origin = USER_WINDOW_MOVE_ORIGINS.remove(&addr);
                 let manager = Self::instance();
                 if manager.is_pinned(&addr) {
                     return Ok(());
@@ -673,34 +686,15 @@ impl VdManager {
                 let Some(workspace) = manager.get_workspace_of_window(addr) else {
                     return Ok(());
                 };
-                let (owners, connected) = {
-                    let state = manager.state.lock();
-                    (
-                        state.monitors_for_workspace(&workspace),
-                        state.connected_monitors.clone(),
-                    )
-                };
                 let Ok(physical) = window.monitor().stable_id() else {
                     return Ok(());
                 };
-                // A shared workspace owns one window set across all of its connected displays.
-                if owners.contains(&physical) {
-                    return Ok(());
-                }
-                if owners.iter().all(|id| !connected.contains(id))
-                    && crate::state::application::FULL_STATE
-                        .load()
-                        .settings
-                        .share_workspaces_between_monitors
-                {
-                    return Ok(());
-                }
-                let target = manager
-                    .state
-                    .lock()
-                    .monitors
-                    .get(&physical)
-                    .map(|m| m.active_workspace_id().clone());
+                let target = workspace_after_user_move(
+                    &manager.state.lock(),
+                    &workspace,
+                    origin.as_ref(),
+                    &physical,
+                );
                 if let Some(target) = target {
                     manager.send_to(&window, &target)?;
                 }
@@ -708,5 +702,110 @@ impl VdManager {
             _ => {}
         }
         Ok(())
+    }
+}
+
+fn workspace_after_user_move(
+    state: &VirtualDesktops,
+    current: &WorkspaceId,
+    origin: Option<&MonitorId>,
+    target: &MonitorId,
+) -> Option<WorkspaceId> {
+    if origin? == target {
+        return None;
+    }
+    let monitor = state.monitors.get(target)?;
+    // Moving between displays owning the same workspace keeps its one window set.
+    if monitor.workspaces.contains(current) {
+        return None;
+    }
+    Some(monitor.active_workspace_id().clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(id: &str) -> MonitorId {
+        MonitorId(id.into())
+    }
+
+    fn shared_workspaces() -> VirtualDesktops {
+        let mut state = VirtualDesktops::default();
+        state.reconcile_monitors(vec![monitor("home"), monitor("laptop")]);
+        state.create_workspace(&monitor("home"), false).unwrap();
+        state.ensure_monitor(monitor("work"));
+        state
+            .set_monitor_workspace_grid(&monitor("work"), Some(&monitor("home")))
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn automatic_relocation_preserves_every_shared_workspace_through_dock_swap() {
+        let mut state = shared_workspaces();
+        let grid = state.monitors[&monitor("home")].workspaces.clone();
+        let ids: Vec<_> = grid.rows().iter().flatten().cloned().collect();
+        for (index, id) in ids.iter().enumerate() {
+            state
+                .workspaces
+                .get_mut(id)
+                .unwrap()
+                .windows
+                .push(42 + index as isize);
+        }
+        // Before the monitor cache catches up, while undocked, and after the
+        // replacement connects, position changes must never imply a user move.
+        for connected in [
+            vec![monitor("home"), monitor("laptop")],
+            vec![monitor("laptop")],
+            vec![monitor("work"), monitor("laptop")],
+        ] {
+            state.reconcile_monitors(connected);
+            for (index, id) in ids.iter().enumerate() {
+                assert_eq!(
+                    workspace_after_user_move(&state, id, None, &monitor("laptop")),
+                    None
+                );
+                assert_eq!(state.workspaces[id].windows, vec![42 + index as isize]);
+            }
+        }
+    }
+
+    #[test]
+    fn deliberate_move_to_independent_monitor_uses_its_active_workspace() {
+        let state = shared_workspaces();
+        let current = state.monitors[&monitor("home")].active_workspace_id();
+        let target = state.monitors[&monitor("laptop")].active_workspace_id();
+        assert_eq!(
+            workspace_after_user_move(&state, current, Some(&monitor("home")), &monitor("laptop")),
+            Some(target.clone())
+        );
+    }
+
+    #[test]
+    fn deliberate_move_between_shared_monitors_keeps_membership() {
+        let mut state = shared_workspaces();
+        state.reconcile_monitors(vec![monitor("home"), monitor("work"), monitor("laptop")]);
+        let current = state.monitors[&monitor("home")].active_workspace_id();
+        assert_eq!(
+            workspace_after_user_move(&state, current, Some(&monitor("home")), &monitor("work")),
+            None
+        );
+    }
+
+    #[test]
+    fn resizing_relocated_window_on_same_monitor_keeps_membership() {
+        let state = shared_workspaces();
+        let current = state.monitors[&monitor("home")].active_workspace_id();
+        assert_eq!(
+            workspace_after_user_move(
+                &state,
+                current,
+                Some(&monitor("laptop")),
+                &monitor("laptop")
+            ),
+            None
+        );
     }
 }
