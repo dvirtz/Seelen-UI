@@ -18,6 +18,11 @@ When both linked monitors are connected, their shared grid has one active worksp
 displays. Each tiling overlay positions only windows physically on its own monitor. When a monitor is disconnected,
 restoring a workspace can move its windows to a connected monitor referencing that workspace.
 
+Automatic window relocation during docking, undocking, or display rearrangement keeps each window's workspace ID, even
+while monitor detection is still updating. Dragging a window between independent monitor grids assigns it to the
+destination's active workspace when the move ends; dragging between displays sharing that workspace keeps its ID.
+Seelen's explicit workspace and move-to-monitor commands continue to update assignments directly.
+
 The separate **Switch workspaces on all monitors together** option synchronizes _independent_ grids by row and column.
 Missing positions are created as needed. Both options can be enabled: shared grids keep their common active workspace,
 and independent grids switch to the corresponding position.
