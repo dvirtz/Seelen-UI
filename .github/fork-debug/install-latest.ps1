@@ -206,7 +206,7 @@ try {
     Write-Host "Settings and previous-build backup: $backup"
     if (!$NoLaunch) {
         Write-Host 'Launching Seelen. Approve its normal helper-service UAC prompt if requested.'
-        $app = Start-Process -FilePath (Join-Path $destination 'seelen-ui.exe') -WorkingDirectory $destination -WindowStyle Normal -PassThru
+        $app = Start-Process -FilePath (Join-Path $destination 'seelen-ui.exe') -WorkingDirectory $destination -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 10
         $app.Refresh()
         if ($app.HasExited) {
