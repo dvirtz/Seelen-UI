@@ -1,11 +1,13 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-Downloads, verifies, installs and launches the latest successful Fork debug build.
+Downloads, verifies, installs and launches the latest successful Fork debug or release build.
 .EXAMPLE
 ./.github/fork-debug/install-latest.ps1 -WhatIf
 .EXAMPLE
 ./.github/fork-debug/install-latest.ps1 -RunId 38632678315 -NoLaunch
+.EXAMPLE
+./.github/fork-debug/install-latest.ps1 -Profile release
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -13,6 +15,8 @@ param(
     [string] $Repository = 'dvirtz/Seelen-UI',
     [ValidateRange(0, [long]::MaxValue)]
     [long] $RunId = 0,
+    [ValidateSet('debug', 'release')]
+    [string] $Profile = 'debug',
     [switch] $NoLaunch
 )
 
@@ -40,23 +44,23 @@ function Get-GitHubHeaders {
     }
 }
 
-function Find-DebugArtifact($ApiRoot, $Headers, [long] $RequestedRun) {
+function Find-ForkArtifact($ApiRoot, $Headers, [long] $RequestedRun, [string] $BuildProfile) {
     $page = 1
     do {
         if ($RequestedRun) {
             $runs = @(Invoke-RestMethod "$ApiRoot/actions/runs/$RequestedRun" -Headers $Headers)
         } else {
-            $result = Invoke-RestMethod "$ApiRoot/actions/workflows/fork-debug.yml/runs?status=success&per_page=50&page=$page" -Headers $Headers
+            $result = Invoke-RestMethod "$ApiRoot/actions/workflows/fork-build.yml/runs?status=success&per_page=50&page=$page" -Headers $Headers
             $runs = @($result.workflow_runs)
         }
         foreach ($run in $runs) {
-            if ($run.conclusion -ne 'success' -or ($run.path -split '@', 2)[0] -ne '.github/workflows/fork-debug.yml') { continue }
+            if ($run.conclusion -ne 'success' -or ($run.path -split '@', 2)[0] -ne '.github/workflows/fork-build.yml') { continue }
             $artifactPage = 1
             do {
                 $result = Invoke-RestMethod "$ApiRoot/actions/runs/$($run.id)/artifacts?per_page=100&page=$artifactPage" -Headers $Headers
                 $artifacts = @($result.artifacts)
                 foreach ($artifact in ($artifacts | Sort-Object created_at -Descending)) {
-                    if (!$artifact.expired -and $artifact.name -match '^seelen-debug-x64-([a-f0-9]{40})$') {
+                    if (!$artifact.expired -and $artifact.name -match "^seelen-$BuildProfile-x64-([a-f0-9]{40})$") {
                         return @{ Run = $run; Artifact = $artifact; SourceSha = $Matches[1] }
                     }
                 }
@@ -65,7 +69,7 @@ function Find-DebugArtifact($ApiRoot, $Headers, [long] $RequestedRun) {
         }
         $page++
     } while (!$RequestedRun -and $runs.Count -eq 50)
-    throw 'No successful Fork debug build with an unexpired debug artifact was found.'
+    throw "No successful Fork build with an unexpired $BuildProfile artifact was found."
 }
 
 function Get-ArtifactPath([string] $Root, [string] $RelativePath) {
@@ -80,7 +84,7 @@ function Get-ArtifactPath([string] $Root, [string] $RelativePath) {
     return $path
 }
 
-function Expand-DebugArtifact([string] $Zip, [string] $Stage) {
+function Expand-ForkArtifact([string] $Zip, [string] $Stage) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
     try {
@@ -97,7 +101,7 @@ function Expand-DebugArtifact([string] $Zip, [string] $Stage) {
     [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Stage)
 }
 
-function Test-DebugArtifact([string] $Stage, [string] $SourceSha) {
+function Test-ForkArtifact([string] $Stage, [string] $SourceSha, [string] $BuildProfile) {
     $manifest = Join-Path $Stage 'ARTIFACT_SHA256SUMS.txt'
     $entries = @(Get-Content -LiteralPath $manifest)
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -114,10 +118,10 @@ function Test-DebugArtifact([string] $Stage, [string] $SourceSha) {
             }
             $index++
             if ($index % 100 -eq 0) {
-                Write-Progress -Activity 'Verifying debug files' -Status "$index / $($entries.Count)" -PercentComplete ($index * 100 / $entries.Count)
+                Write-Progress -Activity 'Verifying build files' -Status "$index / $($entries.Count)" -PercentComplete ($index * 100 / $entries.Count)
             }
         }
-    } finally { Write-Progress -Activity 'Verifying debug files' -Completed }
+    } finally { Write-Progress -Activity 'Verifying build files' -Completed }
     foreach ($file in Get-ChildItem -LiteralPath $Stage -Recurse -File) {
         if ($file.FullName -ne $manifest -and !$seen.Contains($file.FullName)) {
             throw "Artifact contains an unlisted file: $($file.FullName)"
@@ -126,37 +130,47 @@ function Test-DebugArtifact([string] $Stage, [string] $SourceSha) {
     foreach ($name in @('seelen-ui.exe', 'slu.exe', 'slu-service.exe', 'sluhk.dll',
         'seelen_ui.pdb', 'slu.pdb', 'slu_service.pdb', 'sluhk.pdb',
         'SHA256SUMS', 'SHA256SUMS.sig', 'BUILD_INFO.json', 'COMMIT_SHA.txt')) {
-        if (!(Test-Path -LiteralPath (Join-Path $Stage $name) -PathType Leaf)) { throw "Missing debug file: $name" }
+        if (!(Test-Path -LiteralPath (Join-Path $Stage $name) -PathType Leaf)) { throw "Missing build file: $name" }
     }
     foreach ($name in @('static', 'frontend')) {
-        if (!(Test-Path -LiteralPath (Join-Path $Stage $name) -PathType Container)) { throw "Missing debug directory: $name" }
+        if (!(Test-Path -LiteralPath (Join-Path $Stage $name) -PathType Container)) { throw "Missing build directory: $name" }
     }
     $info = Get-Content -LiteralPath (Join-Path $Stage 'BUILD_INFO.json') -Raw | ConvertFrom-Json
     $commit = (Get-Content -LiteralPath (Join-Path $Stage 'COMMIT_SHA.txt') -Raw).Trim()
     if ($info.sourceSha -ne $SourceSha -or $commit -ne $SourceSha -or $info.target -ne 'x86_64-pc-windows-msvc') {
         throw 'Artifact metadata does not match the selected source SHA and Windows x64 target.'
     }
+    # Older debug artifacts predate buildProfile; accept only their exact known profile.
+    $artifactProfile = $info.buildProfile
+    if (!$artifactProfile -and $info.profile -eq 'dev: debug=full, opt-level=0, strip=none, debug-assertions=true') {
+        $artifactProfile = 'debug'
+    }
+    if ($artifactProfile -ne $BuildProfile) {
+        throw "Artifact build profile does not match the requested $BuildProfile profile."
+    }
     return $info
 }
 
 $ErrorActionPreference = 'Stop'
+$Profile = $Profile.ToLowerInvariant()
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $target = Join-Path $workspace 'target'
-$destination = Join-Path $target 'fork-debug'
+$destination = Join-Path $target "fork-$Profile"
 $headers = Get-GitHubHeaders
 $apiRoot = "https://api.github.com/repos/$Repository"
-$selected = Find-DebugArtifact $apiRoot $headers $RunId
+$selected = Find-ForkArtifact $apiRoot $headers $RunId $Profile
+Write-Host "Profile: $Profile"
 Write-Host "Build: $($selected.Run.html_url)"
 Write-Host "Source: $($selected.SourceSha)"
 Write-Host ('Download: {0:N0} MB' -f ($selected.Artifact.size_in_bytes / 1MB))
-if (!$PSCmdlet.ShouldProcess($destination, 'Download, verify and install debug build (back up settings and previous build)')) { return }
+if (!$PSCmdlet.ShouldProcess($destination, "Download, verify and install $Profile build (back up settings and previous build)")) { return }
 
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 $unique = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-$stage = Join-Path $target "fork-debug-stage-$unique"
-$zip = Join-Path $target "fork-debug-download-$unique.zip"
-$backup = Join-Path $target "fork-debug-backup-$unique"
+$stage = Join-Path $target "fork-$Profile-stage-$unique"
+$zip = Join-Path $target "fork-$Profile-download-$unique.zip"
+$backup = Join-Path $target "fork-$Profile-backup-$unique"
 try {
     Write-Host 'Downloading artifact...'
     # HttpWebRequest drops Authorization when following the redirect to artifact storage.
@@ -168,8 +182,8 @@ try {
         }
     }
     Write-Host 'Extracting artifact (many resource files; this can take several minutes)...'
-    Expand-DebugArtifact $zip $stage
-    $info = Test-DebugArtifact $stage $selected.SourceSha
+    Expand-ForkArtifact $zip $stage
+    $info = Test-ForkArtifact $stage $selected.SourceSha $Profile
     Write-Host "Verified source branch: $($info.branch)"
     # Keep Seelen available during download, extraction and verification; close it before replacement.
     $running = @(Get-Process -Name 'seelen-ui', 'slu-service' -ErrorAction SilentlyContinue)
@@ -218,6 +232,6 @@ try {
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     # Only remove this invocation's staging directory under this checkout's target.
     $resolvedStage = [IO.Path]::GetFullPath($stage)
-    if ($resolvedStage -ne (Join-Path $target "fork-debug-stage-$unique")) { throw 'Unexpected staging cleanup path.' }
+    if ($resolvedStage -ne (Join-Path $target "fork-$Profile-stage-$unique")) { throw 'Unexpected staging cleanup path.' }
     if (Test-Path -LiteralPath $resolvedStage) { Remove-Item -LiteralPath $resolvedStage -Recurse -Force }
 }

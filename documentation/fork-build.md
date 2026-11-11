@@ -19,10 +19,10 @@ ignored `.vscode` directory. Its folder points to this checkout.
 ## Edit, push, build, download, debug
 
 1. Edit your Seelen checkout and commit/push your development branch to `origin` (`dvirtz/Seelen-UI`).
-2. On the fork, open **Actions → Fork debug build → Run workflow**. Select your development branch in **Use workflow
+2. On the fork, open **Actions → Fork debug and release builds → Run workflow**. Select your development branch in **Use workflow
    from**, then run the workflow. That branch must contain the workflow and fork tooling. The build uses the selected
    commit for both source and tooling and records its SHA. With GitHub CLI:
-   `gh workflow run fork-debug.yml --repo dvirtz/Seelen-UI --ref feature/my-change`.
+   `gh workflow run fork-build.yml --repo dvirtz/Seelen-UI --ref feature/my-change`.
 3. Wait for a successful run. Download `seelen-debug-x64-<full-SHA>` from that run's artifacts. Extract its contents
    directly into `target/fork-debug/`: `seelen-ui.exe` must be at `target/fork-debug/seelen-ui.exe`. Use an empty
    destination for each download so artifacts from different commits cannot mix.
@@ -65,7 +65,19 @@ The script supports Windows PowerShell 5.1 and PowerShell 7. It authenticates us
 configured GitHub credential helper, in that order. Git must be installed when using the credential helper.
 `-Repository owner/repository` selects a different fork with the same workflow and artifact format.
 
-By default it selects the newest successful **Fork debug build** run with an unexpired debug artifact, across all
+Use `-Profile release` to install the optimized build into `target/fork-release` instead:
+
+```powershell
+.\.github\fork-debug\install-latest.ps1 -Profile release
+.\.github\fork-debug\install-latest.ps1 -Profile release -RunId 38632678315 -NoLaunch
+```
+
+The profile defaults to `debug`, keeping existing commands and the VS Code debug workspace compatible. Each workflow
+run produces `seelen-debug-x64-<full-SHA>` and `seelen-release-x64-<full-SHA>`. Both include matching PDBs and frontend
+source maps. The installer validates the selected profile against `BUILD_INFO.json`; older debug artifacts remain
+supported. Both profiles share Seelen's normal settings, so close the app and service before switching profiles.
+
+By default it selects the newest successful **Fork debug and release builds** run with an unexpired debug artifact, across all
 branches. This is the latest completed build, which may differ from your current checkout. The script identifies the
 source SHA from the artifact name and verifies it against `COMMIT_SHA.txt` and `BUILD_INFO.json`. It prints the actual
 source branch after verification. It does not trigger a new build or change your checkout.
@@ -74,12 +86,12 @@ If Seelen is running, the script asks you to exit through **Settings > Extras > 
 just before backing up settings and replacing the build. It never
 force-stops the app or service. It validates the ZIP digest when GitHub supplies one, checks extraction paths, and
 verifies every extracted file against `ARTIFACT_SHA256SUMS.txt`. Extraction and verification can take several minutes.
-These checks detect corruption; this remains an unsigned debug build from your selected fork.
+These checks detect corruption; both profiles remain unsigned builds from your selected fork.
 
 Before replacement, it copies the normal settings files and `workspaces2.json`/`workspaces3.json` into a uniquely named
-`target/fork-debug-backup-*` directory. An existing `target/fork-debug` installation is moved into that backup's
+`target/fork-<profile>-backup-*` directory. An existing installation of that profile is moved into that backup's
 `build/` subdirectory. Backups are retained; the script never restores settings automatically. The new build uses the
-normal Seelen settings directories and can request UAC for its helper service. Keep `target/fork-debug` in place while
+normal Seelen settings directories and can request UAC for its helper service. Keep the selected installation folder in place while
 its service is registered, as described below. `-NoLaunch` still requires Seelen and its service to be closed for
 installation.
 
@@ -87,15 +99,23 @@ installation.
 
 The workflow reuses `.github/actions/setup` (Node 24, Deno 2, the repository's pinned nightly Rust, npm/Cargo caches)
 and the existing `npm ci`, `npm run build:ui`, and hook DLL build steps. It builds all three application binaries and
-the hook DLL with the dev profile: full debug information, no optimization, no stripping, incremental compilation. A
+the hook DLL in separate debug and release matrix jobs. Debug uses the dev profile: full debug information, no
+optimization, no stripping, incremental compilation. Release uses the repository's release optimizations with runtime
+debug assertions disabled; stripping is disabled to retain matching PDBs. A
 second cache saves recent target outputs per run; the shared setup also caches dependencies and target data. Caches
 accelerate builds but are not downloadable runtime artifacts.
 
 Unlike `tauri build --debug`, direct `cargo build --bins` does not enable `custom-protocol`. This matters: Seelen's
-integrity check uses `tauri::is_dev()` to accept the unsigned debug checksum marker. `TAURI_CONFIG` clears `devUrl`, so
+integrity check uses `tauri::is_dev()` to accept the unsigned checksum marker in both profiles. `TAURI_CONFIG` clears `devUrl`, so
 Tauri embeds `dist` even in development mode and no local HTTP server is needed. The frontend is built without
 `--production`, which preserves source maps. DevTools are already enabled in `src/Cargo.toml`. No signing keys,
-installer, updater publication, translation command, or release build is used.
+installer, updater publication, or translation command is used. For release, the workflow enables debug assertions
+only for Cargo build dependencies (`CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG_ASSERTIONS=true`). This lets the
+existing `src/build.rs` write its unsigned checksum marker without requiring the upstream private key. Runtime
+binaries still have debug assertions disabled, including the service's release crash-recovery policy. These are
+optimized fork builds, not signed production distributions.
+
+Run the installer regression checks locally with `powershell -NoProfile -File .github/fork-debug/test.ps1`.
 
 The artifact contains `seelen-ui.exe`, `slu.exe`, `slu-service.exe`, `sluhk.dll`, each matching `.pdb`, `static/`,
 `SHA256SUMS`, the debug `SHA256SUMS.sig` marker, frontend bundles/maps, the license, the exact source SHA and build

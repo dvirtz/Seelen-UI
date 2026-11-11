@@ -1,4 +1,4 @@
-name: Fork debug build
+name: Fork debug and release builds
 
 on:
   workflow_dispatch:
@@ -9,6 +9,10 @@ permissions:
 jobs:
   build:
     if: github.repository == 'dvirtz/Seelen-UI'
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
     runs-on: windows-2025
     timeout-minutes: 120
     defaults:
@@ -20,6 +24,14 @@ jobs:
       CARGO_PROFILE_DEV_STRIP: none
       CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
       CARGO_PROFILE_DEV_INCREMENTAL: "true"
+      # Keep matching PDBs in both artifacts.
+      CARGO_PROFILE_RELEASE_DEBUG: limited
+      CARGO_PROFILE_RELEASE_STRIP: none
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "false"
+      # src/build.rs gates checksum signing on its own debug_assertions.
+      # Enable them only for build dependencies so unsigned release artifacts
+      # need no upstream signing key; runtime binaries remain release builds.
+      CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG_ASSERTIONS: "true"
       # No custom-protocol: Seelen's unsigned integrity path requires tauri::is_dev().
       # With no devUrl, Tauri embeds frontendDist even in development mode.
       TAURI_CONFIG: '{"build":{"devUrl":null}}'
@@ -36,6 +48,9 @@ jobs:
           if ($LASTEXITCODE) { throw 'Cannot resolve source commit' }
           "sha=$sha" >> $env:GITHUB_OUTPUT
 
+      - name: Run installer regression checks
+        run: ./.github/fork-debug/test.ps1
+
       # Pin packaging tools to the same selected workflow commit as the source.
       - uses: actions/checkout@v4
         with:
@@ -46,15 +61,15 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           rust-targets: x86_64-pc-windows-msvc
-          cache-key-prefix: fork-debug-x64-v1
+          cache-key-prefix: fork-${{ matrix.profile }}-x64-v2
 
-      - name: Restore recent debug outputs
+      - name: Restore recent ${{ matrix.profile }} outputs
         uses: actions/cache@v4
         with:
-          path: target/x86_64-pc-windows-msvc/debug
-          key: fork-debug-outputs-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ steps.source.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/x86_64-pc-windows-msvc/${{ matrix.profile }}
+          key: fork-${{ matrix.profile }}-outputs-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ steps.source.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            fork-debug-outputs-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            fork-${{ matrix.profile }}-outputs-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
 
       - name: Install frontend dependencies
         run: |
@@ -68,12 +83,14 @@ jobs:
 
       - name: Build hook DLL
         run: |
-          cargo build --locked --target x86_64-pc-windows-msvc -p sluhk
+          $cargoProfile = if ('${{ matrix.profile }}' -eq 'debug') { 'dev' } else { 'release' }
+          cargo build --locked --profile $cargoProfile --target x86_64-pc-windows-msvc -p sluhk
           if ($LASTEXITCODE) { throw 'Hook build failed' }
 
       - name: Build all runnable binaries (unsigned, embedded UI)
         run: |
-          cargo build --locked --target x86_64-pc-windows-msvc -p seelen-ui --bins
+          $cargoProfile = if ('${{ matrix.profile }}' -eq 'debug') { 'dev' } else { 'release' }
+          cargo build --locked --profile $cargoProfile --target x86_64-pc-windows-msvc -p seelen-ui --bins
           if ($LASTEXITCODE) { throw 'Rust build failed' }
 
       - name: Stage and verify artifact contents
@@ -81,11 +98,11 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           SOURCE_BRANCH: ${{ github.ref_name }}
           TOOLS_SHA: ${{ github.sha }}
-        run: ./.fork-tools/.github/fork-debug/package.ps1
+        run: ./.fork-tools/.github/fork-debug/package.ps1 -Profile '${{ matrix.profile }}'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: seelen-debug-x64-${{ steps.source.outputs.sha }}
-          path: target/fork-debug/
+          name: seelen-${{ matrix.profile }}-x64-${{ steps.source.outputs.sha }}
+          path: target/fork-${{ matrix.profile }}/
           if-no-files-found: error
           retention-days: 14
