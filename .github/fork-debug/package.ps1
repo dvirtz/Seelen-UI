@@ -1,7 +1,13 @@
+param(
+    [ValidateSet('debug', 'release')]
+    [string] $Profile = 'debug'
+)
+
 $ErrorActionPreference = 'Stop'
-$output = Join-Path $PWD 'target/x86_64-pc-windows-msvc/debug'
-$stage = [System.IO.Path]::GetFullPath((Join-Path $PWD 'target/fork-debug'))
-$expectedStage = [System.IO.Path]::GetFullPath("$PWD/target/fork-debug")
+$Profile = $Profile.ToLowerInvariant()
+$output = Join-Path $PWD "target/x86_64-pc-windows-msvc/$Profile"
+$stage = [System.IO.Path]::GetFullPath((Join-Path $PWD "target/fork-$Profile"))
+$expectedStage = [System.IO.Path]::GetFullPath("$PWD/target/fork-$Profile")
 if ($stage -ne $expectedStage) { throw 'Artifact destination is outside the expected workspace path' }
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -38,7 +44,12 @@ Set-Content -LiteralPath "$stage/COMMIT_SHA.txt" -Value $env:SOURCE_SHA -Encodin
     toolingSha = $env:TOOLS_SHA
     sourceRoot = "$PWD"
     target = 'x86_64-pc-windows-msvc'
-    profile = 'dev: debug=full, opt-level=0, strip=none, debug-assertions=true'
+    buildProfile = $Profile
+    profile = if ($Profile -eq 'debug') {
+        'dev: debug=full, opt-level=0, strip=none, debug-assertions=true'
+    } else {
+        'release: debug=limited, opt-level=z, strip=none, debug-assertions=false'
+    }
     runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
     rustc = ((& rustc --version) -join '')
 } | ConvertTo-Json | Set-Content -LiteralPath "$stage/BUILD_INFO.json" -Encoding utf8
