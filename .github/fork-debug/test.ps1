@@ -92,6 +92,68 @@ try {
     Set-Content -LiteralPath (Join-Path $fixture 'slu.exe') -Value 'damaged'
     Assert-Throws { Test-ForkArtifact $fixture $sha 'debug' } '*checksum mismatch*'
     Assert-Throws { Get-ArtifactPath $fixture '../escape' } '*escapes*'
+
+    # Exercise replacement and startup against isolated settings/builds and a fake process.
+    $source = $ast.Extent.Text
+    $start = $source.IndexOf('    New-Item -ItemType Directory -Path $backup')
+    $end = $source.IndexOf('} finally {', $start)
+    $replaceBuild = [scriptblock]::Create($source.Substring($start, $end - $start))
+    function Start-Process {
+        param($FilePath, $WorkingDirectory, $WindowStyle, [switch] $PassThru)
+        Assert (Test-Path -LiteralPath (Join-Path $backup 'build/old.txt')) 'Backup missing before launch'
+        if ($scenario -eq 'launch-failure') { throw 'Simulated launch failure' }
+        $process = [pscustomobject]@{ HasExited = ($scenario -eq 'early-exit'); Id = 123 }
+        $process | Add-Member -MemberType ScriptMethod -Name Refresh -Value {
+            Assert (Test-Path -LiteralPath (Join-Path $backup 'Roaming/settings.json')) 'Backup deleted before startup verification'
+        }
+        return $process
+    }
+    function Start-Sleep { param($Seconds) }
+    $originalAppData = $env:APPDATA
+    $originalLocalAppData = $env:LOCALAPPDATA
+    try {
+        $env:APPDATA = Join-Path $fixture 'settings-roaming'
+        $env:LOCALAPPDATA = Join-Path $fixture 'settings-local'
+        $settingsRoot = Join-Path $env:APPDATA 'com.seelen.seelen-ui'
+        New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $settingsRoot 'settings.json') -Value 'settings fixture'
+        $target = $fixture
+        $Profile = 'debug'
+        foreach ($scenario in @('running', 'no-launch', 'launch-failure', 'early-exit', 'replacement-failure')) {
+            $NoLaunch = $scenario -eq 'no-launch'
+            $failReplacement = $scenario -eq 'replacement-failure'
+            $unique = [guid]::NewGuid().ToString('N')
+            $backup = Join-Path $target "fork-$Profile-backup-$unique"
+            $destination = Join-Path $target "installed-$unique"
+            $stage = Join-Path $target "stage-$unique"
+            New-Item -ItemType Directory -Path $destination | Out-Null
+            Set-Content -LiteralPath (Join-Path $destination 'old.txt') -Value 'old build'
+            if ($failReplacement) {
+                Assert-Throws { & $replaceBuild } '*does not exist*'
+                Assert (Test-Path -LiteralPath (Join-Path $destination 'old.txt')) 'Failed replacement lost the previous build'
+            } else {
+                New-Item -ItemType Directory -Path $stage | Out-Null
+                Set-Content -LiteralPath (Join-Path $stage 'new.txt') -Value 'new build'
+                if ($scenario -eq 'launch-failure') {
+                    Assert-Throws { & $replaceBuild } '*Simulated launch failure*'
+                } elseif ($scenario -eq 'early-exit') {
+                    Assert-Throws { & $replaceBuild } '*exited during startup*'
+                } else {
+                    & $replaceBuild
+                }
+                Assert (Test-Path -LiteralPath (Join-Path $destination 'new.txt')) 'New build was not installed'
+                Assert ((Test-Path -LiteralPath $backup) -eq ($scenario -ne 'running')) 'Backup retention does not match startup verification'
+                if ($scenario -ne 'running') {
+                    Assert (Test-Path -LiteralPath (Join-Path $backup 'build/old.txt')) 'Previous build was not backed up'
+                    Assert ((Get-Content -LiteralPath (Join-Path $backup 'Roaming/settings.json')) -eq 'settings fixture') 'Settings were not backed up'
+                }
+            }
+            Assert ((Get-Content -LiteralPath (Join-Path $settingsRoot 'settings.json')) -eq 'settings fixture') 'Original settings changed'
+        }
+    } finally {
+        $env:APPDATA = $originalAppData
+        $env:LOCALAPPDATA = $originalLocalAppData
+    }
 } finally {
     $resolved = [IO.Path]::GetFullPath($fixture)
     $expected = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetFileName($fixture))
