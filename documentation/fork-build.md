@@ -90,7 +90,9 @@ These checks detect corruption; both profiles remain unsigned builds from your s
 
 Before replacement, it copies the normal settings files and `workspaces2.json`/`workspaces3.json` into a uniquely named
 `target/fork-<profile>-backup-*` directory. An existing installation of that profile is moved into that backup's
-`build/` subdirectory. Backups are retained; the script never restores settings automatically. The new build uses the
+`build/` subdirectory. The backup is deleted once the launched process passes the startup check (still running after
+10 seconds). If launch fails, the process exits during that check, or `-NoLaunch` is used, the backup is retained.
+The script never restores settings automatically. The new build uses the
 normal Seelen settings directories and can request UAC for its helper service. Keep the selected installation folder in place while
 its service is registered, as described below. `-NoLaunch` still requires Seelen and its service to be closed for
 installation.

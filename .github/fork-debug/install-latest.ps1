@@ -164,7 +164,7 @@ Write-Host "Profile: $Profile"
 Write-Host "Build: $($selected.Run.html_url)"
 Write-Host "Source: $($selected.SourceSha)"
 Write-Host ('Download: {0:N0} MB' -f ($selected.Artifact.size_in_bytes / 1MB))
-if (!$PSCmdlet.ShouldProcess($destination, "Download, verify and install $Profile build (back up settings and previous build)")) { return }
+if (!$PSCmdlet.ShouldProcess($destination, "Download, verify and install $Profile build (back up settings and previous build; delete backup after startup verification)")) { return }
 
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 $unique = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -227,6 +227,13 @@ try {
             throw "Seelen exited during startup. Inspect $env:LOCALAPPDATA\com.seelen.seelen-ui\logs\Seelen UI.log. The verified build remains installed."
         }
         Write-Host "Seelen started (PID $($app.Id))."
+        # Delete only this invocation's backup after the new build passes the startup check.
+        $resolvedBackup = [IO.Path]::GetFullPath($backup)
+        if ($resolvedBackup -ne (Join-Path $target "fork-$Profile-backup-$unique")) { throw 'Unexpected backup cleanup path.' }
+        Remove-Item -LiteralPath $resolvedBackup -Recurse -Force
+        Write-Host 'Startup verified; settings and previous-build backup deleted.'
+    } else {
+        Write-Host 'Backup retained because startup was not verified (-NoLaunch).'
     }
 } finally {
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
